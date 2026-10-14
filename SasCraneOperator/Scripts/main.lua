@@ -1,7 +1,7 @@
 -- SasCraneOperator: a crew member who works the dock crane for a cargo boat.
 --
 -- Cargo boats that have no crew positions get one: "Crane Operator", in the boat's crew chart. Put a
--- hired crew member who is assigned to the boat into it and, while the boat lies beside a dock crane,
+-- hired crew member who is assigned to the boat into it and, while the boat is docked beside a dock crane,
 -- they load and unload the cargo that the Ships At Sea Logistics planner has marked for this port,
 -- or that has been marked by hand, one piece at a time, sitting in the crane's seat while they work.
 --
@@ -14,7 +14,8 @@
 -- What it changes in the game: the crew position is added to the boat while the mod runs and is not
 -- written to the save, so a save loads the same with or without the mod; the operator's name is
 -- remembered in operators.txt beside this mod and they are seated again after a load. Cargo is moved
--- with the crane's own attach and set-down calls; the crane's arm is not animated.
+-- with the crane's own attach and set-down calls, and the stationary dock crane's joints are steered
+-- so that the hook goes to the piece and carries it across.
 --
 -- Everything runs on the game thread, from game-thread timers. Key presses and hooks only queue work.
 
@@ -27,11 +28,10 @@ local CATEGORY = "/Game/ShipsAtSea/Crew/CrewTaskCategories/DA_CrewTaskCategory_E
 local GROUP_NAME = "Crane Operator"
 local TOAST_CHANNEL = "Channel.Toast.Simple.Info"
 local TICK_MS = 500
-local SECONDS_PER_PIECE = 18     -- from one piece set down to the next one set down
-local LIFT_SECONDS = 4           -- how long a piece hangs on the hook
+local MOTION_MS = 100            -- how often the crane's joints are steered
 local CRANE_REACH_CM = 10000     -- the boat's hold must be this close to a dock crane
 local CARGO_REACH_CM = 8000      -- dock cargo and dock areas must be this close to the crane
-local MAX_SPEED_CM = 60          -- the boat counts as moored below this speed
+local MAX_SPEED_CM = 60          -- if the game will not say whether the boat is docked: still enough to count as it
 
 ---------------------------------------------------------------------------------------------------
 -- Helpers
@@ -457,11 +457,22 @@ local function FindPlace(area, cargo)
              rotation = { Pitch = out.Rotation.Pitch, Yaw = out.Rotation.Yaw, Roll = out.Rotation.Roll } }
 end
 
--- Where the boat with a seated operator lies: its hold, the dock crane in reach, and the dock areas.
+-- Is the boat made fast to the dock, with the pull-in finished? If the game will not say, a boat
+-- that is all but still counts.
+local function IsDocked(boat)
+    local ok, docked = pcall(function()
+        local docking = boat.DockingComponent
+        return docking:IsDocked() and not docking.bIsPulling
+    end)
+    if ok then return docked end
+    local velocity = boat:GetVelocity()
+    return math.sqrt(velocity.X ^ 2 + velocity.Y ^ 2) <= MAX_SPEED_CM
+end
+
+-- Where the docked boat with a seated operator lies: its hold, the dock crane in reach, and the dock areas.
 local function WorkSite(comp)
     local boat = comp:GetOwner()
-    local velocity = boat:GetVelocity()
-    if math.sqrt(velocity.X ^ 2 + velocity.Y ^ 2) > MAX_SPEED_CM then return nil end
+    if not IsDocked(boat) then return nil end
     local hold = nil
     for _, area in ipairs(Live("CargoArea")) do
         if not hold and IsHold(area) and Same(area:GetAttachParentActor(), boat) then hold = area end
@@ -615,9 +626,7 @@ local function NextMove(site, load, unload)
 end
 
 local Manual = {}        -- cargo guid -> true, for pieces marked by hand with F5
-local SETTLE_LIFT_SECONDS = 2
-local SETTLE_REST_SECONDS = 3
-local Job = nil          -- the piece on the hook: { cargo, to, place, crane, ticks, settle }
+local Job = nil          -- the piece being moved, see StartJob
 local Rest = 0           -- ticks until the operator starts the next piece
 local Working = false    -- was there work when last looked
 local Moved = 0
@@ -801,27 +810,267 @@ local function SetSpotHere()
     Toast(name .. " will wait here when not at the crane")
 end
 
+---------------------------------------------------------------------------------------------------
+-- Moving the crane. The stationary dock crane has four joints that matter here, each of which goes
+-- smoothly to whatever value it is given: the platform swivels (degrees), the boom is hoisted
+-- (degrees, 0 to 50), the boom telescopes (0 to 230, two centimetres a unit) and the cable drum pays
+-- out (centimetres, 10 to 1000). The figures below were measured on the crane in game: the boom is
+-- 445 cm long from a pivot 25 cm behind and 335 cm above the crane's origin, and lies 2.1 degrees
+-- below level at hoist 0; the hook hangs 53 cm plus the paid-out cable below the boom's tip.
+
+local CELL_CM = 25
+local BOOM_CM, BOOM_BACK_CM, BOOM_UP_CM, BOOM_DROOP_DEG = 445, 25, 335, 2.1
+local TELESCOPE_CM_PER_UNIT, TELESCOPE_MAX, HOIST_MAX = 2, 230, 50
+local HOOK_BELOW_TIP_CM, DRUM_MIN, DRUM_MAX = 53, 10, 1000
+local JOINT = { swivel = "Joint_SwivelPlatform", hoist = "Joint_BoomHoist", telescope = "Joint_TelescopicBoom", drum = "Joint_CableDrum" }
+local SPEED = { swivel = 35, hoist = 20, telescope = 90, drum = 120 }   -- units a second
+local CLOSE = { swivel = 1.5, hoist = 1.0, telescope = 4, drum = 8 }    -- near enough to count as there
+local PARKED = { swivel = 0, hoist = 0, telescope = 0, drum = DRUM_MIN }
+local PHASE_SECONDS = 12  -- a step that has not finished by then is given up on and the next one starts
+
+local function Turn(degrees)  -- into -180 .. 180
+    return (degrees + 180) % 360 - 180
+end
+
+local function Clamp(value, low, high)
+    return math.max(low, math.min(high, value))
+end
+
+-- Does this crane have the joints the figures above describe?
+local function CanSteer(crane)
+    return ClassName(crane):find("StationaryCrane_T01", 1, true) ~= nil and Valid(crane[JOINT.swivel]) and Valid(crane[JOINT.drum])
+end
+
+-- The swivel, hoist and telescope that put the boom's tip over a point, and how high the tip then is.
+local function Reach(crane, point)
+    local base, yaw = crane:K2_GetActorLocation(), crane:K2_GetActorRotation().Yaw
+    local dx, dy = point.X - base.X, point.Y - base.Y
+    local out = math.sqrt(dx * dx + dy * dy)
+    local level = math.cos(math.rad(BOOM_DROOP_DEG))
+    local hoist, telescope = 0, 0
+    local need = (out + BOOM_BACK_CM) / level   -- boom length that reaches it with the boom down
+    if need >= BOOM_CM then
+        telescope = Clamp((need - BOOM_CM) / TELESCOPE_CM_PER_UNIT, 0, TELESCOPE_MAX)
+    else  -- closer than the shortest boom lying flat: raise it
+        hoist = Clamp(BOOM_DROOP_DEG + math.deg(math.acos(Clamp((out + BOOM_BACK_CM) / BOOM_CM, 0, 1))), 0, HOIST_MAX)
+    end
+    local length = BOOM_CM + telescope * TELESCOPE_CM_PER_UNIT
+    local tipZ = base.Z + BOOM_UP_CM + length * math.sin(math.rad(hoist - BOOM_DROOP_DEG))
+    return { swivel = Turn(math.deg(math.atan(dy, dx)) - yaw), hoist = hoist, telescope = telescope }, tipZ
+end
+
+-- The whole pose that puts the hook at a point.
+local function HookAt(crane, point)
+    local pose, tipZ = Reach(crane, point)
+    pose.drum = Clamp(tipZ - HOOK_BELOW_TIP_CM - point.Z, DRUM_MIN, DRUM_MAX)
+    return pose
+end
+
+local Steer = nil  -- { crane, goal = { swivel, hoist, telescope, drum } }: where the joints are being taken
+
+local function There(crane, goal)
+    for part, name in pairs(JOINT) do
+        if goal[part] ~= nil then
+            local off = goal[part] - crane[name]:GetCurrentValue()
+            if part == "swivel" then off = Turn(off) end
+            if math.abs(off) > CLOSE[part] then return false end
+        end
+    end
+    return true
+end
+
+-- One step of every joint towards its goal, at that joint's speed.
+local function SteerStep()
+    local s = Steer
+    if not s then return end
+    if not Valid(s.crane) then
+        Steer = nil
+        return
+    end
+    for part, name in pairs(JOINT) do
+        if s.goal[part] ~= nil then
+            local joint = s.crane[name]
+            local now = joint:GetCurrentValue()
+            local off = s.goal[part] - now
+            if part == "swivel" then off = Turn(off) end
+            local step = SPEED[part] * MOTION_MS / 1000 * 2  -- aimed a little ahead: the joint eases towards it
+            local to = now + Clamp(off, -step, step)
+            if part == "swivel" then to = Turn(to) end
+            joint:SetTargetValue(to)
+        end
+    end
+    if There(s.crane, s.goal) then Steer = nil end
+end
+
+-- Where an area's grid sits in the world: its corner, and the directions its X and Y cells run in.
+local function GridFrame(area)
+    local origin = area.OriginComponent
+    local at, yaw = origin:K2_GetComponentLocation(), math.rad(origin:K2_GetComponentRotation().Yaw)
+    return at, { X = math.cos(yaw), Y = math.sin(yaw) }, { X = -math.sin(yaw), Y = math.cos(yaw) }
+end
+
+-- The cell a piece stands on in its area and how many cells it covers each way.
+local function Footing(area, cargo)
+    local item = cargo:GetRepresentedInventoryItem():GetAddress()
+    local low, high = { X = math.huge, Y = math.huge, Z = math.huge }, { X = -math.huge, Y = -math.huge, Z = -math.huge }
+    area:GetInventory().CellsOccupancyMap:ForEach(function(key, value)
+        local held = value:get()
+        if Valid(held) and held:GetAddress() == item then
+            local cell = key:get()
+            for _, axis in ipairs({ "X", "Y", "Z" }) do
+                low[axis], high[axis] = math.min(low[axis], cell[axis]), math.max(high[axis], cell[axis])
+            end
+        end
+    end)
+    if low.X == math.huge then return nil end
+    local yaw = 0
+    Each(area:GetInventory().GridInventoryItems.Entries, function(placed)
+        if Valid(placed.InventoryItem) and placed.InventoryItem:GetAddress() == item then yaw = placed.GridTransform.Rotation.Yaw end
+    end)
+    return { Z = low.Z, across = high.X - low.X + 1, along = high.Y - low.Y + 1, yaw = yaw }
+end
+
+-- Works out where the hook has to go to pick the piece up and to set it down, and starts the crane
+-- towards it. A crane this mod cannot steer, or a piece it cannot place in the world, is moved the
+-- plain way: lifted where it stands and set down a few seconds later.
+local function StartJob(site, move)
+    local crane, cargo = site.crane, move.cargo
+    local job = { crane = crane, cargo = cargo, to = move.to, place = move.place, settle = move.settle,
+                  guid = CargoGuid(cargo), phase = "plain", ticks = 0 }
+    local ok = pcall(function()
+        if not CanSteer(crane) then return end
+        local from = cargo.CargoArea
+        local footing = Footing(from, cargo)
+        if not footing then return end
+        local hookAt = cargo:K2_GetActorLocation()
+        local top = hookAt.Z + 120
+        pcall(function()
+            local hook = cargo.CargoHook:K2_GetComponentLocation()
+            hookAt, top = { X = hook.X, Y = hook.Y, Z = hook.Z }, hook.Z
+        end)
+        local fromAt = GridFrame(from)
+        local hookUp = top - (fromAt.Z + footing.Z * CELL_CM)   -- the hook's height above the piece's foot
+
+        local toAt, across, along = GridFrame(move.to)
+        local wide, long = footing.across, footing.along
+        if math.abs(Turn(move.place.rotation.Yaw - footing.yaw)) > 45 and math.abs(Turn(move.place.rotation.Yaw - footing.yaw)) < 135 then
+            wide, long = long, wide  -- set down turned a quarter
+        end
+        local gx, gy = (move.place.position.X + wide / 2) * CELL_CM, (move.place.position.Y + long / 2) * CELL_CM
+        job.pick = { X = hookAt.X, Y = hookAt.Y, Z = top + 15 }  -- just above it, not pressing on it
+        job.drop = { X = toAt.X + across.X * gx + along.X * gy, Y = toAt.Y + across.Y * gx + along.Y * gy,
+                     Z = toAt.Z + move.place.position.Z * CELL_CM + hookUp }
+        job.phase = "clear"
+    end)
+    if not ok then job.phase = "plain" end
+    Job = job
+end
+
+local function Goto(job, goal)
+    Steer = { crane = job.crane, goal = goal }
+    job.ticks = 0
+end
+
+local function SetDown(job)
+    if Valid(job.crane) and Valid(job.cargo) and Same(job.crane.AttachedCargo, job.cargo) then
+        job.crane:ServerDetachCargo(job.to, job.place.position, job.place.rotation)
+        if not job.settle then
+            Moved = Moved + 1
+            if job.guid then Manual[job.guid] = nil end  -- done; without this it would be carried straight back
+        end
+    end
+end
+
+-- While a crane carries a piece over an area the game lights up, in green, the cells it would be set
+-- down on. Someone at the controls has that cleared when they let go; setting a piece down from
+-- here does not, so the lit cells are put out by hand.
+local GhostReport = false
+
+local function ClearGhost(area)
+    pcall(function()
+        local lit = area.CargoRepresentationComponent.HighlightedCellsMap
+        local count = 0
+        lit:ForEach(function(_, value)
+            local cell = value:get()
+            if Valid(cell) then
+                cell:SetVisibility(false, false)
+                count = count + 1
+            end
+        end)
+        local emptied = count > 0 and pcall(function() lit:Empty() end)
+        if count > 0 and not GhostReport then
+            GhostReport = true
+            Log(string.format("put out %d lit cell(s) left under a set-down piece (list emptied: %s)", count, tostring(emptied)))
+        end
+    end)
+end
+
+-- The steps of moving one piece. Each waits for the crane to get where the step before sent it.
+local function JobStep()
+    local job = Job
+    if not job then return end
+    if not Valid(job.crane) or not Valid(job.cargo) then
+        Job, Steer = nil, nil
+        return
+    end
+    job.ticks = job.ticks + 1
+    local seconds = job.ticks * MOTION_MS / 1000
+    local arrived = Steer == nil or seconds > PHASE_SECONDS
+
+    if job.phase == "plain" then
+        if job.ticks == 1 then job.crane:ServerAttachCargo(job.cargo) end
+        if seconds >= 4 then
+            SetDown(job)
+            Job, Rest = nil, math.floor(8000 / TICK_MS)
+        end
+    elseif job.phase == "clear" then          -- hook up out of the way first
+        Goto(job, { drum = DRUM_MIN })
+        job.phase = "to pick"
+    elseif job.phase == "to pick" and arrived then
+        local pose = Reach(job.crane, job.pick)
+        pose.drum = DRUM_MIN
+        Goto(job, pose)
+        job.phase = "lower to pick"
+    elseif job.phase == "lower to pick" and arrived then
+        Goto(job, HookAt(job.crane, job.pick))
+        job.phase = "attach"
+    elseif job.phase == "attach" and arrived then
+        job.crane:ServerAttachCargo(job.cargo)
+        job.ticks = 0
+        job.phase = "lift"
+    elseif job.phase == "lift" and seconds >= 0.8 then
+        Goto(job, { drum = DRUM_MIN })
+        job.phase = "to drop"
+    elseif job.phase == "to drop" and arrived then
+        local pose = Reach(job.crane, job.drop)
+        pose.drum = DRUM_MIN
+        Goto(job, pose)
+        job.phase = "lower to drop"
+    elseif job.phase == "lower to drop" and arrived then
+        Goto(job, HookAt(job.crane, job.drop))
+        job.phase = "set down"
+    elseif job.phase == "set down" and arrived then
+        SetDown(job)
+        job.ticks = 0
+        job.phase = "release"
+    elseif job.phase == "release" and seconds >= 0.6 then
+        ClearGhost(job.to)
+        Goto(job, { drum = DRUM_MIN })
+        job.phase = "done"
+    elseif job.phase == "done" and arrived then
+        ClearGhost(job.to)
+        Job, Rest = nil, math.floor(1000 / TICK_MS)
+    end
+end
+
+local ParkTries = 0
+
 local function Work()
     if not StrandedChecked then
         StrandedChecked = true
         RecoverStranded()
     end
-    if Job then
-        Job.ticks = Job.ticks - 1
-        if Job.ticks > 0 then return end
-        local job = Job
-        Job = nil
-        local rest = job.settle and SETTLE_REST_SECONDS or (SECONDS_PER_PIECE - LIFT_SECONDS)
-        Rest = math.floor(rest * 1000 / TICK_MS)
-        if Valid(job.crane) and Valid(job.cargo) and Same(job.crane.AttachedCargo, job.cargo) then
-            job.crane:ServerDetachCargo(job.to, job.place.position, job.place.rotation)
-            if not job.settle then
-                Moved = Moved + 1
-                if job.guid then Manual[job.guid] = nil end  -- done; without this it would be carried straight back
-            end
-        end
-        return
-    end
+    if Job then return end  -- the piece in hand is seen to by JobStep
     if Rest > 0 then
         Rest = Rest - 1
         return
@@ -875,7 +1124,18 @@ local function Work()
         Rest = math.floor(SEAT_SECONDS * 1000 / TICK_MS)
         return
     end
-    if not move and AtCrane then LeaveCrane() end
+    if not move and AtCrane then
+        -- Put the crane back as it was found before getting out of the seat.
+        local crane = AtCrane.crane
+        if Valid(crane) and CanSteer(crane) and not There(crane, PARKED) and ParkTries < 15 then
+            ParkTries = ParkTries + 1
+            Steer = { crane = crane, goal = PARKED }
+            Rest = math.floor(1000 / TICK_MS)
+            return
+        end
+        LeaveCrane()
+    end
+    ParkTries = 0
     if move then
         if not Working and not move.settle then
             Working = true
@@ -883,12 +1143,7 @@ local function Work()
             Toast(operator .. " has started working the crane")
         end
         Complaint = nil
-        local guid = CargoGuid(move.cargo)  -- read before the lift: a piece on the hook no longer answers
-        site.crane:ServerAttachCargo(move.cargo)
-        local lift = move.settle and SETTLE_LIFT_SECONDS or LIFT_SECONDS
-        Job = { cargo = move.cargo, to = move.to, place = move.place, crane = site.crane, settle = move.settle,
-                guid = guid,
-                ticks = math.floor(lift * 1000 / TICK_MS) }
+        StartJob(site, move)  -- reads the piece's ID before any lift: a piece on the hook no longer answers
         return
     end
     if complaint and complaint ~= Complaint then
@@ -1120,6 +1375,21 @@ LoopInGameThreadWithDelay(TICK_MS, function()
         Job = nil
         Rest = math.floor(10000 / TICK_MS)
         Log("work failed: " .. tostring(err):gsub("\n.*", ""))
+    end
+    return false
+end)
+
+LoopInGameThreadWithDelay(MOTION_MS, function()
+    local ok, err = pcall(JobStep)
+    if not ok then
+        Job, Steer = nil, nil
+        Rest = math.floor(10000 / TICK_MS)
+        Log("moving a piece failed: " .. tostring(err):gsub("\n.*", ""))
+    end
+    ok, err = pcall(SteerStep)
+    if not ok then
+        Steer = nil
+        Log("steering the crane failed: " .. tostring(err):gsub("\n.*", ""))
     end
     return false
 end)

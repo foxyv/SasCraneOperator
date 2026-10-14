@@ -5,8 +5,8 @@ A crew member who works the dock crane for your cargo boat in Ships At Sea, as a
 ## What it does
 
 Cargo boats that have no crew positions (the class 1 and class 2 cargo boats) get one in their crew
-chart: **Crane Operator**. Put a hired crew member in it and, whenever the boat is stopped beside a
-dock crane, they load and unload the cargo that has been marked, one piece about every 18 seconds.
+chart: **Crane Operator**. Put a hired crew member in it and, whenever the boat is docked beside a
+dock crane, they load and unload the cargo that has been marked, one piece at a time.
 
 Cargo gets marked in two ways:
 
@@ -21,8 +21,10 @@ The operator takes pieces from the top of a stack first, unloads before loading,
 piece left with nothing under it. Unloaded cargo counts as delivered. A toast says when they start
 and finish, and when they have to stop because the hold or the dock is full.
 
-While there is work the operator sits in the dock crane's seat. When it is done they go back to
-their place on the boat.
+While there is work the operator sits in the dock crane's seat and the crane moves: the boom swings
+and extends over the piece, the hook comes down and takes it, and it is carried over to where it
+goes and lowered. A piece takes about half a minute. When the work is done the crane is put back as
+it was and the operator goes back to their place on the boat.
 
 ## Install
 
@@ -56,7 +58,8 @@ without it; a crew member who was the operator is simply resting on the boat.
 1. Hire a crew member and assign them to the cargo boat.
 2. Open the boat's crew chart and drag them onto the **Crane Operator** position. It takes about a
    second.
-3. Stop the boat within 100 m of a dock crane. The operator starts on whatever is marked.
+3. Dock the boat within 100 m of a dock crane. Once it is made fast, the operator starts on whatever
+   is marked. They stop when you undock.
 
 To take them off duty, drag them back to Resting.
 
@@ -86,7 +89,11 @@ To take them off duty, drag them back to Resting.
 
 ## Limits
 
-- The crane's arm does not move. A piece is lifted where it stands and appears where it is set down.
+- The crane swings the short way round at a fixed hook height and does not look out for what is in
+  the way, so a load can pass through a tall stack or part of the boat. A piece that is still
+  swinging on the cable jumps the last bit into its place when it is set down.
+- Only the stationary dock crane is moved. At any other kind of crane a piece is lifted where it
+  stands and appears where it is set down.
 - The operator does not walk to the crane or back; they appear in the seat and back on the boat. The
   cargo boat's deck has no walkable route for crew.
 - Crane cargo only (pallets, crates and the like), not boxes carried by hand.
