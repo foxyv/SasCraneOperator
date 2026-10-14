@@ -21,6 +21,9 @@ The operator takes pieces from the top of a stack first, unloads before loading,
 piece left with nothing under it. Unloaded cargo counts as delivered. A toast says when they start
 and finish, and when they have to stop because the hold or the dock is full.
 
+While there is work the operator sits in the dock crane's seat. When it is done they go back to
+their place on the boat.
+
 ## Install
 
 You need Windows, the Steam version of Ships At Sea, and UE4SS installed first.
@@ -63,6 +66,9 @@ To take them off duty, drag them back to Resting.
   crane's camera, up to 80 m away.
 - **Ctrl+Alt+O** puts the first resting crew member of the boat you are next to on crane duty, or
   takes the operator off. It does the same as dragging in the crew chart.
+- **Ctrl+Alt+H** sets where the operator waits on the boat when not at the crane: stand on the boat
+  where you want them and press it. Without it they go back to wherever they last stood on the
+  boat, or to the helm if that is not known.
 
 ## What it changes in the game
 
@@ -73,10 +79,16 @@ To take them off duty, drag them back to Resting.
   be assigned to the boat at all.
 - **Cargo** is moved with the dock crane's own attach and set-down calls, into a free place the
   game's cargo grid offers.
+- **The operator** is put in the crane's seat with the crane's own driver call, and their idle
+  behaviour is stopped while they sit there. While they are in the seat the crane is in use, so you
+  cannot climb in until they finish. A waiting place set with Ctrl+Alt+H is kept in `spots.txt` in
+  the mod's folder.
 
 ## Limits
 
 - The crane's arm does not move. A piece is lifted where it stands and appears where it is set down.
+- The operator does not walk to the crane or back; they appear in the seat and back on the boat. The
+  cargo boat's deck has no walkable route for crew.
 - Crane cargo only (pallets, crates and the like), not boxes carried by hand.
 - The operator does not work while you are in the crane yourself.
 - Marks made with F5 last for the session; they are not saved.

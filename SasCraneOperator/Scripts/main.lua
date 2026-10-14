@@ -3,10 +3,11 @@
 -- Cargo boats that have no crew positions get one: "Crane Operator", in the boat's crew chart. Put a
 -- hired crew member who is assigned to the boat into it and, while the boat lies beside a dock crane,
 -- they load and unload the cargo that the Ships At Sea Logistics planner has marked for this port,
--- one piece at a time.
+-- or that has been marked by hand, one piece at a time, sitting in the crane's seat while they work.
 --
 -- Ctrl+Alt+O  seats the first resting crew member of the boat you are next to as crane operator, or
 --             takes the operator off again. Use it if dragging in the crew chart does not take.
+-- Ctrl+Alt+H  sets where the operator stands on the boat when not at the crane: where you are standing.
 -- F5          marks the piece of crane cargo you are looking at for the operator to move: to the boat
 --             if it is on the dock, to the dock if it is in the hold. Again takes the mark off.
 --
@@ -19,6 +20,7 @@
 
 local ScriptDir = debug.getinfo(1, "S").source:sub(2):match("^(.*)[/\\][^/\\]*$") or "."
 local OperatorsPath = ScriptDir .. "\\..\\operators.txt"
+local SpotsPath = ScriptDir .. "\\..\\spots.txt"
 local MarksPath = ScriptDir .. "\\..\\..\\SasLogistics\\highlight.txt"
 
 local CATEGORY = "/Game/ShipsAtSea/Crew/CrewTaskCategories/DA_CrewTaskCategory_Engineering.DA_CrewTaskCategory_Engineering"
@@ -621,7 +623,189 @@ local Working = false    -- was there work when last looked
 local Moved = 0
 local Complaint = nil
 
+-- The operator's place at the crane. While there is work they sit in the dock crane's seat, put
+-- there with the crane's own driver component; when it is done they go back to where they stood on
+-- the boat. A crew member cannot walk there: the boat's deck has no walkable route for them.
+
+local SEAT_SECONDS = 3   -- in the seat before the first lift
+local AtCrane = nil      -- { crane, character, boat, controller, home }
+
+local function CraneDriver(crane)
+    local ok, driver = pcall(function() return crane.DriverComponent.Driver end)
+    return ok and Valid(driver) and driver or nil
+end
+
+local function SendTo(character, place)
+    pcall(function() character:K2_SetActorLocation(place, false, {}, true) end)
+end
+
+-- Is the character standing on this boat (on its hull, or on something fixed to it)?
+local function StandsOn(character, boat)
+    local ok, on = pcall(function()
+        local under = character.BasedMovement.MovementBase:GetOwner()
+        for _ = 1, 6 do
+            if not Valid(under) then return false end
+            if Same(under, boat) then return true end
+            under = under:GetAttachParentActor()
+        end
+        return false
+    end)
+    return ok and on
+end
+
+-- A place on the boat, kept relative to the boat so that it still holds after the boat has moved
+-- and turned.
+local function ToBoat(boat, place)
+    local at, yaw = boat:K2_GetActorLocation(), math.rad(boat:K2_GetActorRotation().Yaw)
+    local dx, dy = place.X - at.X, place.Y - at.Y
+    return { X = dx * math.cos(yaw) + dy * math.sin(yaw), Y = -dx * math.sin(yaw) + dy * math.cos(yaw), Z = place.Z - at.Z }
+end
+
+local function FromBoat(boat, spot)
+    local at, yaw = boat:K2_GetActorLocation(), math.rad(boat:K2_GetActorRotation().Yaw)
+    return { X = at.X + spot.X * math.cos(yaw) - spot.Y * math.sin(yaw),
+             Y = at.Y + spot.X * math.sin(yaw) + spot.Y * math.cos(yaw), Z = at.Z + spot.Z }
+end
+
+local function HelmExit(boat)
+    local ok, exit = pcall(function() return boat.DriverComponent:GetDriverExitLocation() end)
+    return ok and exit and exit.X and exit or nil
+end
+
+local Spots = {}   -- crew member name -> where they stand on their boat, relative to the boat
+local Pinned = {}  -- crew member name -> true when that place was set with Ctrl+Alt+H; kept in spots.txt
+
+local function ReadPinned()
+    local file = io.open(SpotsPath, "r")
+    if not file then return end
+    for line in file:lines() do
+        local name, x, y, z = line:match("^(.-)|([%-%d%.]+)|([%-%d%.]+)|([%-%d%.]+)%s*$")
+        if name and name ~= "" then
+            Spots[name] = { X = tonumber(x), Y = tonumber(y), Z = tonumber(z) }
+            Pinned[name] = true
+        end
+    end
+    file:close()
+end
+
+local function WritePinned()
+    local file = io.open(SpotsPath, "w")
+    if not file then return end
+    for name in pairs(Pinned) do
+        file:write(string.format("%s|%.1f|%.1f|%.1f\n", name, Spots[name].X, Spots[name].Y, Spots[name].Z))
+    end
+    file:close()
+end
+
+ReadPinned()
+
+-- Notes where the operator stands while they are on the boat and away from the wheel, so that they
+-- can be sent back to their own spot. The place at the wheel is yours and is never remembered.
+local function NoteSpot(name, character, boat)
+    if Pinned[name] then return end
+    if not Valid(character) or not StandsOn(character, boat) then return end
+    local here, helm = character:K2_GetActorLocation(), HelmExit(boat)
+    if helm and Dist(here, helm) < 200 then return end
+    Spots[name] = ToBoat(boat, here)
+end
+
+-- Where the operator goes back to: their own spot on the boat if one is known, otherwise the place
+-- beside the helm where someone leaving the wheel is put, otherwise the hold.
+local function HomeOnBoat(site, name)
+    if Spots[name] then return Spots[name] end
+    local helm = HelmExit(site.boat)
+    if helm then return ToBoat(site.boat, helm) end
+    local hold = site.hold:K2_GetActorLocation()
+    return ToBoat(site.boat, { X = hold.X, Y = hold.Y, Z = hold.Z + 150 })
+end
+
+-- In the seat the crew member's own behaviour is stopped; left running, it has them eat crisps and
+-- stretch at the controls.
+local function EnterCrane(site, character, name)
+    NoteSpot(name, character, site.boat)
+    local controller = character.Controller
+    pcall(function() controller.BrainComponent:StopLogic("crane") end)
+    pcall(function() character:StopAnimMontage(nil) end)
+    site.crane.DriverComponent:SetDriver(character)
+    pcall(function() character:StopAnimMontage(nil) end)
+    AtCrane = { crane = site.crane, character = character, boat = site.boat, controller = controller,
+                home = HomeOnBoat(site, name) }
+end
+
+local function LeaveCrane()
+    local at = AtCrane
+    AtCrane = nil
+    if not at or not Valid(at.character) then return end
+    if Valid(at.crane) and Same(CraneDriver(at.crane), at.character) then
+        at.crane.DriverComponent:RemoveCurrentDriver()
+    end
+    if Valid(at.boat) then  -- back to their spot on the boat, wherever the boat is now
+        local home = FromBoat(at.boat, at.home)
+        SendTo(at.character, { X = home.X, Y = home.Y, Z = home.Z + 20 })
+    end
+    pcall(function() at.controller.BrainComponent:RestartLogic() end)
+end
+
+-- A crew member found in a crane's seat that this run of the mod did not put there (the mod was
+-- reloaded while they worked) is taken out and sent back to their boat's hold.
+local StrandedChecked = false
+
+local function RecoverStranded()
+    for _, crane in ipairs(Live("CargoCrane")) do
+        pcall(function()
+            local driver = CraneDriver(crane)
+            if not driver or not ClassName(driver):find("CrewMember", 1, true) then return end
+            crane.DriverComponent:RemoveCurrentDriver()
+            local boat = driver.CrewMember.Boat
+            for _, area in ipairs(Live("CargoArea")) do
+                if IsHold(area) and Same(area:GetAttachParentActor(), boat) then
+                    local at = area:K2_GetActorLocation()
+                    SendTo(driver, { X = at.X, Y = at.Y, Z = at.Z + 150 })
+                end
+            end
+            Log("took a crew member left in a crane's seat back to their boat")
+        end)
+    end
+end
+
+-- Ctrl+Alt+H: the operator of the boat you are on stands where you are standing.
+local function SetSpotHere()
+    local pawn = FindFirstOf("PlayerController").Pawn
+    local here = pawn:K2_GetActorLocation()
+    local chosen, chosenBoat, best = nil, nil, CRANE_REACH_CM
+    for _, comp in ipairs(Live("SasBoatCrewComponent")) do
+        pcall(function()
+            local slot = CraneSlot(comp)
+            if not slot or not Valid(slot.CrewMember) then return end
+            local d = Dist(comp:GetOwner():K2_GetActorLocation(), here)
+            if d < best then chosen, chosenBoat, best = slot.CrewMember, comp:GetOwner(), d end
+        end)
+    end
+    if not chosen then
+        Toast("No crane operator on a boat near you")
+        return
+    end
+    if not StandsOn(pawn, chosenBoat) then
+        Toast("Stand on the boat, where the crane operator should wait")
+        return
+    end
+    local name = MemberName(chosen)
+    Spots[name] = ToBoat(chosenBoat, here)
+    Pinned[name] = true
+    WritePinned()
+    if AtCrane and Same(AtCrane.character, chosen.Character) then
+        AtCrane.home = Spots[name]
+    elseif Valid(chosen.Character) then
+        SendTo(chosen.Character, { X = here.X, Y = here.Y, Z = here.Z + 20 })
+    end
+    Toast(name .. " will wait here when not at the crane")
+end
+
 local function Work()
+    if not StrandedChecked then
+        StrandedChecked = true
+        RecoverStranded()
+    end
     if Job then
         Job.ticks = Job.ticks - 1
         if Job.ticks > 0 then return end
@@ -644,7 +828,7 @@ local function Work()
     end
     Rest = math.floor(2000 / TICK_MS)  -- look for work every two seconds when idle
 
-    local site, operator = nil, nil
+    local site, operator, character = nil, nil, nil
     for _, comp in ipairs(Live("SasBoatCrewComponent")) do
         if not site then
             pcall(function()
@@ -652,12 +836,20 @@ local function Work()
                 if slot and Valid(slot.CrewMember) then
                     site = WorkSite(comp)
                     operator = site and MemberName(slot.CrewMember) or nil
+                    character = site and slot.CrewMember.Character or nil
                 end
             end)
         end
     end
+    -- Someone else in the seat (you, usually) means the crane is taken; the operator in it does not.
+    local driver = site and CraneDriver(site.crane) or nil
+    local taken = driver ~= nil and not Same(driver, character)
+    if AtCrane and (not site or taken or not Same(AtCrane.crane, site.crane) or not Same(AtCrane.character, character)) then
+        LeaveCrane()  -- the boat has left, the operator was changed, or the crane is no longer theirs
+    end
+    if site and not AtCrane then pcall(NoteSpot, operator, character, site.boat) end
     local move, complaint = nil, nil
-    if site and not site.crane:IsOccupied() and site.crane:IsPowered() then
+    if site and not taken and site.crane:IsPowered() then
         local held = site.crane.AttachedCargo
         if Valid(held) then
             -- A piece the crane would not set down where it was sent: put it wherever its area has room.
@@ -678,6 +870,12 @@ local function Work()
             if count > 0 then move, complaint = NextMove(site, load, unload) end
         end
     end
+    if move and not AtCrane and Valid(character) then
+        EnterCrane(site, character, operator)
+        Rest = math.floor(SEAT_SECONDS * 1000 / TICK_MS)
+        return
+    end
+    if not move and AtCrane then LeaveCrane() end
     if move then
         if not Working and not move.settle then
             Working = true
@@ -873,6 +1071,11 @@ RegisterKeyBind(Key.F5, function()
     MarkWanted = true
 end)
 
+local SpotWanted = false
+RegisterKeyBind(Key.H, { ModifierKey.CONTROL, ModifierKey.ALT }, function()
+    SpotWanted = true
+end)
+
 ---------------------------------------------------------------------------------------------------
 
 local Ticks = 0
@@ -900,6 +1103,11 @@ LoopInGameThreadWithDelay(TICK_MS, function()
         local ok, err = pcall(ToggleMark)
         if not ok then Log("marking failed: " .. tostring(err):gsub("\n.*", "")) end
         pcall(UpdateMarkers)
+    end
+    if SpotWanted then
+        SpotWanted = false
+        local ok, err = pcall(SetSpotHere)
+        if not ok then Log("setting the spot failed: " .. tostring(err):gsub("\n.*", "")) end
     end
     if Ticks % 2 == 0 then pcall(UpdateMarkers) end
     if Ticks % 4 == 0 then
