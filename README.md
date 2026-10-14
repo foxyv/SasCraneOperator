@@ -20,13 +20,17 @@ Cargo gets marked in two ways:
   it loads. Take loads out of the warehouse yourself as usual.
 - **By hand.** Look at a piece of crane cargo and press **F5**. A piece on the dock is marked to go
   to the boat, a piece in the hold to go to the dock. It gets a floating TO BOAT or TO DOCK marker,
-  like the game's markers for a tracked mission. F5 again takes the mark off.
+  like the game's markers for a tracked mission. F5 again takes the mark off. While an operator is
+  on duty nearby, the piece you are looking at shows a hint saying what F5 will do with it, so with
+  stacked pieces you can see which one will be picked.
 
 ### How the operator works
 
 While there is work the operator sits in the crane's seat and the crane moves. The boom goes over the
-piece, the hook comes down and latches it, it is lifted, carried across, turned to face the way its
-new place does, and lowered into it. A piece takes about half a minute. When the work is done the
+piece, the hook comes down and latches it, it is lifted straight up off its stack, carried across,
+turned to face the way its new place does, lined up squarely over it, and lowered into it. On the
+deck cranes the boom is drawn in before every swing and run out again after it, so it clears the
+ship's superstructure, and the load is carried high enough to clear everything under its way. A piece takes about half a minute. When the work is done the
 crane is put back as it was found and the operator goes back to their place on the boat.
 
 Along the way the operator:
@@ -35,7 +39,8 @@ Along the way the operator:
 - **moves aside anything standing on a marked piece** before lifting it, and lets down any piece
   left with nothing under it;
 - **sets pieces down neatly**: squarely on top of a piece of the same size, or else in the spot on
-  the floor that sits most snugly against other pieces and the area's sides;
+  the floor that sits most snugly against other pieces and the area's sides, filling an area from
+  the far side in so nothing already set down is in the way;
 - **puts each piece only where it belongs**: medium and large cargo go to their own dock areas;
 - **brings a piece the warehouse put out somewhere no crane reaches** to the dock area by the boat
   first, with a toast;
@@ -87,7 +92,9 @@ without it; a crew member who was the operator is simply resting on the boat.
 2. Open the boat's crew chart and drag them onto the **Crane Operator** position. It takes about a
    second. On the class 3 ship they can be moved between Crane Operator and Engineering both ways.
 3. Dock the boat: beside a dock crane for the class 1 and 2 boats, anywhere for the class 3 ship.
-   Once it is made fast, the operator starts on whatever is marked. They stop when you undock.
+   Once it is made fast, the operator starts on whatever is marked. They stop when you undock. A
+   boat too big to dock where its cargo has to go can also just lie still beside the dock with its
+   engines off; starting an engine counts as leaving.
 
 To take them off duty, drag them back to Resting or into another position.
 
@@ -119,9 +126,10 @@ To take them off duty, drag them back to Resting or into another position.
 
 ## Limits
 
-- The crane does not look out for what is in the way. Before a long swing it lifts the load high
-  (the deck cranes to about 7 m above their foot), which clears most cargo, but a load can still meet
-  a tall stack or part of the boat.
+- The crane does not plan a way around things, only over them. Before each move it traces straight
+  down along the load's way to find the highest thing under it and carries the load a metre above
+  that, if the arm reaches so high. If the crane is caught on something anyway, it lifts a metre and
+  carries on, a few times at most.
 - A piece keeps the way it faced when it was picked up, turned to match its new place; it is not
   turned a quarter round to line up with its neighbours.
 - Only the stationary dock crane and the class 3 ship's deck cranes are moved. At any other kind of

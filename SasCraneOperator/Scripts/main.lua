@@ -19,19 +19,20 @@
 --
 -- Everything runs on the game thread, from game-thread timers. Key presses and hooks only queue work.
 
+-- Settings in capitals are plain globals of this mod's own Lua state: a Lua chunk may only have 200
+-- locals, and this one has more than that.
 local ScriptDir = debug.getinfo(1, "S").source:sub(2):match("^(.*)[/\\][^/\\]*$") or "."
 local OperatorsPath = ScriptDir .. "\\..\\operators.txt"
 local SpotsPath = ScriptDir .. "\\..\\spots.txt"
 local MarksPath = ScriptDir .. "\\..\\..\\SasLogistics\\highlight.txt"
 
-local CATEGORY = "/Game/ShipsAtSea/Crew/CrewTaskCategories/DA_CrewTaskCategory_Engineering.DA_CrewTaskCategory_Engineering"
-local GROUP_NAME = "Crane Operator"
-local TOAST_CHANNEL = "Channel.Toast.Simple.Info"
-local TICK_MS = 500
-local MOTION_MS = 100            -- how often the crane's joints are steered
-local CRANE_REACH_CM = 10000     -- the boat's hold must be this close to a dock crane
-local CARGO_REACH_CM = 8000      -- dock cargo and dock areas must be this close to the crane
-local MAX_SPEED_CM = 60          -- if the game will not say whether the boat is docked: still enough to count as it
+CATEGORY = "/Game/ShipsAtSea/Crew/CrewTaskCategories/DA_CrewTaskCategory_Engineering.DA_CrewTaskCategory_Engineering"
+GROUP_NAME = "Crane Operator"
+TOAST_CHANNEL = "Channel.Toast.Simple.Info"
+TICK_MS = 500
+MOTION_MS = 100            -- how often the crane's joints are steered
+CRANE_REACH_CM = 10000     -- the boat's hold must be this close to a dock crane
+CARGO_REACH_CM = 8000      -- dock cargo and dock areas must be this close to the crane
 
 ---------------------------------------------------------------------------------------------------
 -- Helpers
@@ -413,7 +414,7 @@ end
 -- game's own operators too. A load that comes off within a second and a half of being latched, while
 -- you are at the controls, is latched again straight away. Letting go again soon after that is taken
 -- as meant, and honoured.
-local STEADY_SECONDS = 1.5
+STEADY_SECONDS = 1.5
 local Latches = {}   -- crane address -> { cargo, at, caught }
 local Catches = {}   -- loads to latch again: { crane, cargo }
 
@@ -455,7 +456,7 @@ local function SteadyStep()
     end
 end
 
-local CRANE_BASE = "/Game/ShipsAtSea/Gameplay/Cargo/Crane/BP_CargoCrane_Base.BP_CargoCrane_Base_C"
+CRANE_BASE = "/Game/ShipsAtSea/Gameplay/Cargo/Crane/BP_CargoCrane_Base.BP_CargoCrane_Base_C"
 
 local Hooks = {
     [CRANE_BASE .. ":OnCargoAttached_Base"] = function(context) OnLatched(context:get()) end,
@@ -597,16 +598,33 @@ local function FindPlace(area, cargo, near)
              rotation = { Pitch = out.Rotation.Pitch, Yaw = out.Rotation.Yaw, Roll = out.Rotation.Roll } }
 end
 
--- Is the boat made fast to the dock, with the pull-in finished? If the game will not say, a boat
--- that is all but still counts.
+-- Is any of the boat's engines running?
+local function EngineRunning(boat)
+    for _, className in ipairs({ "BoatEngine", "BoatIntegratedPropulsor" }) do
+        for _, engine in ipairs(Live(className)) do
+            local ok, running = pcall(function()
+                local owner = engine:GetAttachParentActor()
+                if not Same(owner, boat) and not Same(engine:GetOwner(), boat) then return false end
+                return engine:IsEngineRunning()
+            end)
+            if ok and running then return true end
+        end
+    end
+    return false
+end
+
+-- Is the boat ready to work cargo? Made fast to the dock with the pull-in finished, or, for a boat too
+-- big to dock where its cargo has to go, lying still with its engines off.
+MOORED_SPEED_CM = 30
+
 local function IsDocked(boat)
     local ok, docked = pcall(function()
         local docking = boat.DockingComponent
         return docking:IsDocked() and not docking.bIsPulling
     end)
-    if ok then return docked end
+    if ok and docked then return true end
     local velocity = boat:GetVelocity()
-    return math.sqrt(velocity.X ^ 2 + velocity.Y ^ 2) <= MAX_SPEED_CM
+    return math.sqrt(velocity.X ^ 2 + velocity.Y ^ 2) <= MOORED_SPEED_CM and not EngineRunning(boat)
 end
 
 -- Where the docked boat with a seated operator lies: its hold, the cranes that will do the work, and
@@ -773,7 +791,7 @@ end
 -- after the other, so each is possible when its turn comes; if the pieces in the way of a spot
 -- cannot all be found a gap, the next spot is tried.
 
-local TIDY_ROUNDS = 3     -- plans made for one stuck piece before giving up
+TIDY_ROUNDS = 3     -- plans made for one stuck piece before giving up
 local TidyPlan = {}       -- moves still to make: { cargo, place }
 local TidyRounds = 0
 local TidyTold = false
@@ -969,7 +987,7 @@ local function NextTidy(site, waiting)
     return { cargo = step.cargo, to = site.hold, place = step.place, settle = true, tidy = true }
 end
 
-local CELL_SIZE_CM = 25
+CELL_SIZE_CM = 25
 local CanReach  -- (site, move) -> true if one of the site's cranes can be steered to both places
 local Unreachable = {}  -- cargo guid -> true for pieces the boat's own cranes cannot get to; left alone
 
@@ -1026,12 +1044,12 @@ local function ClearAbove(site, cargo)
     return { cargo = actor, to = area, place = place, settle = true, tidy = true }
 end
 
-local PLACES_TRIED = 16  -- free spots tried, nearest a crane first, when looking for a place in reach
+PLACES_TRIED = 16  -- free spots tried, nearest a crane first, when looking for a place in reach
 local PlaceInReach  -- (site, area, cargo) -> a place in the area a crane can reach with the piece,
                     -- or nil and a hand-over move when the neatest place is the other crane's
 local Relayed = {}  -- cargo guid -> true once handed over, so a piece is never passed back and forth
 local NeedsStaging  -- (site, cargo) -> true if a piece to load stands where no crane of the site gets to it
-local STAGE_RANGE_CM = 100000  -- pieces to load this close to the boat are brought to its dock
+STAGE_RANGE_CM = 100000  -- pieces to load this close to the boat are brought to its dock
 local Relay         -- (site, cargo, docks) -> a move across the hold to where the other crane can unload it
 
 -- The next piece to move: unloading first, so that the hold has room for what is loaded after, and
@@ -1127,7 +1145,7 @@ local Complaint = nil
 -- there with the crane's own driver component; when it is done they go back to where they stood on
 -- the boat. A crew member cannot walk there: the boat's deck has no walkable route for them.
 
-local SEAT_SECONDS = 3   -- in the seat before the first lift
+SEAT_SECONDS = 3   -- in the seat before the first lift
 local AtCrane = nil      -- { crane, character, boat, controller, home }
 
 local function CraneDriver(crane)
@@ -1306,13 +1324,13 @@ end
 -- value it is given, and a model of where those values put the end of its arm. The figures were
 -- measured in game by moving one joint at a time.
 
-local CELL_CM = 25
-local DRUM_MIN, DRUM_MAX = 10, 1000
-local PHASE_SECONDS = 12  -- a step that has not finished by then is given up on and the next one starts
+CELL_CM = 25
+DRUM_MIN, DRUM_MAX = 10, 1000
+PHASE_SECONDS = 12  -- a step that has not finished by then is given up on and the next one starts
 -- The deck crane latches a piece with its hook joint this far above the piece's lifting point, as
 -- the game's own operators do. Latching pulls the piece up to the hook; from much lower it would still
 -- sit in its place, and the game would set it straight back down.
-local HOOK_ON_LIFT_CM = 55
+HOOK_ON_LIFT_CM = 55
 
 local function Turn(degrees)  -- into -180 .. 180
     return (degrees + 180) % 360 - 180
@@ -1327,8 +1345,8 @@ end
 -- drum pays out (centimetres). The boom is 445 cm long from a pivot 25 cm behind and 335 cm above the
 -- crane's origin and lies 2.1 degrees below level at hoist 0; the hook hangs 53 cm plus the paid-out
 -- cable below its tip. The boom's height follows from its reach, so the height asked for is ignored.
-local BOOM_CM, BOOM_BACK_CM, BOOM_UP_CM, BOOM_DROOP_DEG = 445, 25, 335, 2.1
-local TELESCOPE_CM_PER_UNIT, TELESCOPE_MAX, HOIST_MAX = 2, 230, 50
+BOOM_CM, BOOM_BACK_CM, BOOM_UP_CM, BOOM_DROOP_DEG = 445, 25, 335, 2.1
+TELESCOPE_CM_PER_UNIT, TELESCOPE_MAX, HOIST_MAX = 2, 230, 50
 
 local DockCrane = {
     match = "StationaryCrane_T01",
@@ -1365,7 +1383,7 @@ end
 -- each unit of telescope (1118 at most), set at 48 degrees below the lower arm plus 50 for each unit
 -- of bend. The hook hangs 47 cm to the left of the arm, 3 cm beyond its end and 78 cm plus the
 -- paid-out cable below it.
-local KNUCKLE = { pivotBack = 20, pivotUp = 266, lower = 268.5, lowerAt = 33.2, lowerPerUnit = 42.2, lowerMin = 7.3,
+KNUCKLE = { pivotBack = 20, pivotUp = 266, lower = 268.5, lowerAt = 33.2, lowerPerUnit = 42.2, lowerMin = 7.3,
                   upper = 359, upperPerUnit = 792, upperMax = 1118, bendAt = -48, bendPerUnit = 50,
                   side = 47, ahead = 3 }
 
@@ -1525,7 +1543,7 @@ local function JobPoints(move)
     local pick = { X = hookAt.X, Y = hookAt.Y, Z = top + 15 }  -- just above it, not pressing on it
     local drop = { X = toAt.X + across.X * gx + along.X * gy, Y = toAt.Y + across.Y * gx + along.Y * gy,
                    Z = toAt.Z + move.place.position.Z * CELL_CM + hookUp }
-    return pick, drop
+    return pick, drop, hookUp
 end
 
 -- How high the arm's end travels: high enough for the hook to clear both places by a metre, and for
@@ -1606,7 +1624,7 @@ end
 --   * on the floor, the share of the spot's edge that is up against another piece or the area's side,
 --     so that pieces go in rows and blocks, not scattered with gaps between;
 --   * on top of a piece of exactly the same size, squarely, which is neater still.
-local NEAT_STACK = 1.1
+NEAT_STACK = 1.1
 
 local function FreeSpots(area, cargo)
     local mine = Boxes(cargo.CargoArea)[cargo:GetRepresentedInventoryItem():GetAddress()]
@@ -1670,8 +1688,9 @@ local function FreeSpots(area, cargo)
     return spots
 end
 
--- The neatest spots within a crane's reach of it, closest first among the equally neat.
-local NEAT_REACH_CM = 1300
+-- The neatest spots within a crane's reach of it, furthest first among the equally neat: an area is
+-- filled from the far side in, so nothing already set down is in the way of what comes after.
+NEAT_REACH_CM = 1150
 
 local function Neatest(spots, at, count)
     local ranked = {}
@@ -1682,7 +1701,7 @@ local function Neatest(spots, at, count)
     table.sort(ranked, function(a, b)
         local na, nb = math.floor(a.spot.neat * 20), math.floor(b.spot.neat * 20)  -- neatness in steps of 5 %
         if na ~= nb then return na > nb end
-        return a.d < b.d
+        return a.d > b.d
     end)
     local out = {}
     for index = 1, math.min(#ranked, count) do out[index] = ranked[index].spot end
@@ -1754,7 +1773,7 @@ PlaceInReach = function(site, area, cargo)
         for _, crane in ipairs(site.cranes) do cranes[#cranes + 1] = crane:K2_GetActorLocation() end
         local best = {}
         for _, crane in ipairs(cranes) do
-            for _, spot in ipairs(Neatest(spots, crane, 4)) do best[#best + 1] = spot end
+            for _, spot in ipairs(Neatest(spots, crane, 8)) do best[#best + 1] = spot end
         end
         table.sort(best, function(a, b) return math.floor(a.neat * 20) > math.floor(b.neat * 20) end)
         local guid = CargoGuid(cargo) or "?"
@@ -1840,6 +1859,64 @@ Relay = function(site, cargo, docks)
     return nil
 end
 
+-- What stands under the load's way. The load goes up where it is, in along its bearing to the drawn-in
+-- reach, round at that reach, and out to its new place; along that way, and to either side of it by
+-- the load's half-width, a trace straight down finds the top of whatever is there (cargo, the boat's
+-- superstructure, the other crane, the dock's buildings). The crane and the load itself are ignored.
+TRACE_STEP_CM = 50
+DRAWN_IN_CM = 450      -- about how far out the hook hangs with the deck crane's boom drawn in
+local Kismet = nil
+
+local function TopAt(crane, cargo, x, y, fromZ)
+    if not Valid(Kismet) then Kismet = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary") end
+    local colour = { R = 0, G = 0, B = 0, A = 0 }
+    local hit = {}
+    local found = Kismet:LineTraceSingle(crane, { X = x, Y = y, Z = fromZ }, { X = x, Y = y, Z = fromZ - 3000 }, 0, false,
+        { crane, cargo }, 0, hit, true, colour, colour, 0.0)
+    if not found then return nil end
+    hit = hit.OutHit or hit
+    local at = hit.ImpactPoint or hit.Location
+    return at and at.Z or nil
+end
+
+-- The highest point under the load's way from one place to the other, or nil if nothing was found.
+local function HighestOnTheWay(crane, cargo, from, to, halfWidth)
+    local base = crane:K2_GetActorLocation()
+    local function polar(point)
+        local dx, dy = point.X - base.X, point.Y - base.Y
+        return math.sqrt(dx * dx + dy * dy), math.atan(dy, dx)
+    end
+    local r1, a1 = polar(from)
+    local r2, a2 = polar(to)
+    local inner = math.min(DRAWN_IN_CM, r1, r2)
+    local points = {}
+    local function line(ra, rb, angle)
+        local steps = math.max(1, math.ceil(math.abs(rb - ra) / TRACE_STEP_CM))
+        for i = 0, steps do
+            local r = ra + (rb - ra) * i / steps
+            points[#points + 1] = { r = r, a = angle }
+        end
+    end
+    line(r1, inner, a1)
+    local turn = Turn(math.deg(a2 - a1))
+    local steps = math.max(1, math.ceil(math.abs(math.rad(turn)) * inner / TRACE_STEP_CM))
+    for i = 0, steps do points[#points + 1] = { r = inner, a = a1 + math.rad(turn) * i / steps } end
+    line(inner, r2, a2)
+
+    local fromZ = base.Z + 2500
+    local highest = nil
+    for _, point in ipairs(points) do
+        local cx, cy = base.X + point.r * math.cos(point.a), base.Y + point.r * math.sin(point.a)
+        local sx, sy = -math.sin(point.a) * halfWidth, math.cos(point.a) * halfWidth  -- across the way
+        local fx, fy = math.cos(point.a) * halfWidth, math.sin(point.a) * halfWidth   -- along the way
+        for _, offset in ipairs({ { 0, 0 }, { sx, sy }, { -sx, -sy }, { fx, fy }, { -fx, -fy } }) do
+            local ok, z = pcall(TopAt, crane, cargo, cx + offset[1], cy + offset[2], fromZ)
+            if ok and z and (not highest or z > highest) then highest = z end
+        end
+    end
+    return highest, #points
+end
+
 -- Starts the crane on a move. A crane this mod cannot steer, or a move it cannot work out, is done the
 -- plain way: the piece is lifted where it stands and set down a few seconds later.
 local function StartJob(move)
@@ -1851,6 +1928,47 @@ local function StartJob(move)
         if ok and pick then
             job.pick, job.drop = pick, drop
             job.tip = TravelTip(job.model, pick, drop, crane)
+            -- High enough that the load, hanging below the hook, passes over everything under its way
+            -- with a metre to spare.
+            pcall(function()
+                local _, _, hang = JobPoints(move)
+                local half = 150
+                pcall(function()
+                    local centre, extent = {}, {}
+                    cargo:GetActorBounds(true, centre, extent, false)
+                    extent = extent.BoxExtent or extent
+                    half = math.sqrt(extent.X * extent.X + extent.Y * extent.Y)
+                end)
+                local highest, sampled = HighestOnTheWay(crane, cargo, pick, drop, half)
+                if highest then
+                    local need = highest + hang + 100 + job.model.hookBelow + DRUM_MIN
+                    if need > job.tip then
+                        Log(string.format("carrying the %s %.1f m higher to clear what is under its way (%d points looked at)",
+                            ClassName(cargo), (need - job.tip) / 100, sampled))
+                        job.tip = need
+                    end
+                end
+            end)
+            -- And over the cargo around the
+            -- place it is going to and the place it comes from, with a metre to spare.
+            pcall(function()
+                local _, _, hang = JobPoints(move)
+                local tallest = -math.huge
+                for _, other in ipairs(Live("HeavyCargo")) do
+                    if not Same(other, cargo) then
+                        local at = other:K2_GetActorLocation()
+                        if Dist(at, drop) < 900 or Dist(at, pick) < 900 then
+                            local centre, extent = {}, {}
+                            other:GetActorBounds(true, centre, extent, false)
+                            centre, extent = centre.Origin or centre, extent.BoxExtent or extent
+                            tallest = math.max(tallest, centre.Z + extent.Z)
+                        end
+                    end
+                end
+                if tallest > -math.huge then
+                    job.tip = math.max(job.tip, tallest + hang + 100 + job.model.hookBelow + DRUM_MIN)
+                end
+            end)
             job.phase = "clear"
         end
         -- How the piece faces now against how its place in its area faces, and so how it must face in
@@ -1889,10 +2007,19 @@ end
 local function SwingRoute(crane, model, target, tipZ)
     if not model.travelUp or target.swivel == nil then return { target } end
     local now = crane[model.joints.swivel]:GetCurrentValue()
-    if math.abs(target.swivel - now) < 20 then return { target } end
+    if math.abs(target.swivel - now) < 10 then return { target } end
+    -- Up where it is (when the arm can get there), then the boom drawn in, swung round drawn in, and
+    -- only then run out to the new place: the short boom clears the ship's superstructure.
+    local current = {}
+    for part, name in pairs(model.joints) do current[part] = crane[name]:GetCurrentValue() end
     local up = model.Arm(crane, HookNow(crane), tipZ)
-    if not up then return { target } end
-    return { WithDrum(up.pose, DRUM_MIN), target }
+    local lifted = WithDrum(up and up.pose or current, DRUM_MIN)
+    lifted.turn = nil
+    local drawnIn = WithDrum(lifted, DRUM_MIN)
+    drawnIn.telescope = 0
+    local swung = WithDrum(drawnIn, DRUM_MIN)
+    swung.swivel = target.swivel
+    return { lifted, drawnIn, swung, target }
 end
 
 -- The next goal for putting a crane back as it was found, by the same way round: up where it is,
@@ -1908,6 +2035,12 @@ local function ParkGoal(crane, model)
         local up = model.Arm(crane, hook, high)
         if up then return WithDrum(up.pose, DRUM_MIN) end
         return model.parked
+    end
+    -- Boom drawn in before swinging round, as when working.
+    local telescope = crane[model.joints.telescope]:GetCurrentValue()
+    if telescope > model.close.telescope * 2 then
+        local goal = { drum = DRUM_MIN, telescope = 0 }
+        return goal
     end
     -- Over the resting place: straight ahead of the crane, where the hook hangs when parked.
     local rest = { X = base.X + 553 * math.cos(yaw) - 47 * math.sin(yaw), Y = base.Y + 553 * math.sin(yaw) + 47 * math.cos(yaw), Z = base.Z }
@@ -1987,7 +2120,7 @@ local function JobStep()
     local seconds = job.ticks * MOTION_MS / 1000
     local arrived = Steer == nil or seconds > PHASE_SECONDS
     local carrying = job.phase == "to drop" or job.phase == "lower to drop" or job.phase == "set down"
-        or job.phase == "turn" or job.phase == "settle in"
+        or job.phase == "turn" or job.phase == "aim" or job.phase == "settle in"
         or (job.phase == "lift" and seconds >= 0.8 and job.lifted)
     if carrying and not Same(job.crane.AttachedCargo, job.cargo) then
         -- Loads come off this hook now and then, for the game's own operators too. While it is still
@@ -2016,6 +2149,30 @@ local function JobStep()
         Goto(job, { drum = DRUM_MIN })
         job.phase = "done"
         return
+    end
+    -- Caught on something: the crane is being driven but the hook has not moved for a second. Lift a
+    -- metre and go on with the way from there, a few times at most.
+    local moving = job.phase == "to pick" or job.phase == "lower to pick" or job.phase == "to drop" or job.phase == "lower to drop"
+    if job.model and job.model.feel and moving and Steer ~= nil and job.ticks % 10 == 0 and job.ticks > 0 then
+        local hook = HookNow(job.crane)
+        local far = false  -- still well short of where it is being taken, not just easing in
+        for part, name in pairs(job.model.joints) do
+            local goal = Steer.goal[part]
+            if goal ~= nil and math.abs(goal - job.crane[name]:GetCurrentValue()) > job.model.close[part] * 5 then far = true end
+        end
+        local stuck = far and job.lastHook3 and Dist(hook, job.lastHook3) < 5 and math.abs(hook.Z - job.lastHook3.Z) < 5
+        job.lastHook3 = { X = hook.X, Y = hook.Y, Z = hook.Z }
+        if stuck and (job.unstuck or 0) < 3 then
+            job.unstuck = (job.unstuck or 0) + 1
+            job.lastHook3 = nil
+            job.tip = (job.tip or hook.Z) + 100
+            local up = job.model.Arm(job.crane, hook, math.max(job.tip, hook.Z + job.model.hookBelow + DRUM_MIN + 100))
+            Log("the crane is caught on something; lifting a metre and carrying on")
+            job.route = job.route or {}
+            table.insert(job.route, 1, Steer.goal)  -- then on to where it was going
+            if up then Goto(job, WithDrum(up.pose, DRUM_MIN)) else Goto(job, { drum = DRUM_MIN }) end
+            return
+        end
     end
     if job.route and #job.route > 0 then  -- part way along a route: on to its next step
         if arrived then Goto(job, table.remove(job.route, 1)) end
@@ -2085,8 +2242,18 @@ local function JobStep()
     elseif job.phase == "attach" and arrived then
         job.crane:ServerAttachCargo(job.cargo)
         job.heldAtOnce = Same(job.crane.AttachedCargo, job.cargo)
-        -- Lift at once, before the game decides the piece is still in its place and sets it down.
-        if job.model.feel then Goto(job, { drum = DRUM_MIN }) end
+        -- Lift at once, before the game decides the piece is still in its place and sets it down. The
+        -- deck crane lifts the first stretch with its arm, straight up off the stack, and only then
+        -- reels in the cable.
+        if job.model.feel then
+            local drum = job.crane[job.model.joints.drum]:GetCurrentValue()
+            local up = job.model.Arm(job.crane, HookNow(job.crane), job.arm.tipZ + 80)
+            if up then
+                Goto(job, WithDrum(up.pose, drum))
+            else
+                Goto(job, { drum = DRUM_MIN })
+            end
+        end
         job.ticks = 0
         job.phase = "lift"
     elseif job.phase == "lift" and seconds >= 0.8 then
@@ -2142,11 +2309,33 @@ local function JobStep()
             job.phase, job.ticks, job.turnSign, job.lastError = "turn", 0, 1, nil
             Steer = nil
         elseif job.model.feel then
-            job.phase, job.ticks, job.lastLoad, job.still = "settle in", 0, nil, 0
+            job.phase, job.ticks, job.aims = "aim", 0, 0
             Steer = nil
         else
             Goto(job, WithDrum(job.arm.pose, DrumFor(job.model, job.arm.tipZ, job.drop.Z)))
             job.phase = "set down"
+        end
+    elseif job.phase == "aim" then
+        -- Puts the load squarely over its place before lowering it: where the load's lifting point
+        -- actually is against where it should be, and the arm moved by the difference, until it is
+        -- within a few centimetres. The model of the arm alone is out by a little.
+        if job.ticks % 8 ~= 0 or (Steer ~= nil and seconds < 3) then return end
+        local at = job.cargo.CargoHook:K2_GetComponentLocation()
+        local ex, ey = job.drop.X - at.X, job.drop.Y - at.Y
+        if math.sqrt(ex * ex + ey * ey) <= 4 or job.aims >= 5 then
+            job.phase, job.ticks, job.lastLoad, job.still = "settle in", 0, nil, 0
+            Steer = nil
+            return
+        end
+        job.aims = job.aims + 1
+        job.aim = job.aim or { X = job.drop.X, Y = job.drop.Y, Z = job.drop.Z }
+        job.aim = { X = job.aim.X + ex, Y = job.aim.Y + ey, Z = job.aim.Z }
+        local arm = job.model.Arm(job.crane, job.aim, job.arm.tipZ)
+        if arm then
+            job.arm = arm
+            local drum = job.crane[job.model.joints.drum]:GetCurrentValue()
+            Steer = { crane = job.crane, model = job.model, goal = WithDrum(arm.pose, drum) }
+            job.ticks = 0
         end
     elseif job.phase == "settle in" then
         -- Lets the load down by watching it, until its lifting point is where it will be once the
@@ -2172,7 +2361,7 @@ local function JobStep()
         local error = Turn(job.finalYaw - job.cargo:K2_GetActorRotation().Yaw)
         if math.abs(error) <= 3 or seconds > 10 then
             if job.model.feel then
-                job.phase, job.ticks, job.lastLoad, job.still = "settle in", 0, nil, 0
+                job.phase, job.ticks, job.aims = "aim", 0, 0
                 Steer = nil
             else
                 Goto(job, WithDrum(job.arm.pose, DrumFor(job.model, job.arm.tipZ, job.drop.Z)))
@@ -2350,10 +2539,11 @@ end
 -- a crane's camera. A marked piece carries one of the game's own in-world markers, like those the
 -- game shows for a tracked mission, saying where it is going.
 
-local MARK_RANGE_CM = 8000
-local TO_BOAT, TO_DOCK = "TO BOAT", "TO DOCK"
-local MARKER_ICON = "/Game/ShipsAtSea/UI/WorldMap/Materials/Circle/MI_CargoMapIcon_Green.MI_CargoMapIcon_Green"
-local MARKER_TAG = "UIMapMarker.Type.Marker.Mission.Cargo.M"
+MARK_RANGE_CM = 8000
+HINT_MARK, HINT_UNMARK = "F5 TO MARK FOR THE CRANE", "F5 TO TAKE THE MARK OFF"
+TO_BOAT, TO_DOCK = "TO BOAT", "TO DOCK"
+MARKER_ICON = "/Game/ShipsAtSea/UI/WorldMap/Materials/Circle/MI_CargoMapIcon_Green.MI_CargoMapIcon_Green"
+MARKER_TAG = "UIMapMarker.Type.Marker.Mission.Cargo.M"
 local MarkerClass = nil
 local Markers = {}       -- cargo guid -> { actor = marker, title = ... }
 local StraysCleared = false
@@ -2385,7 +2575,7 @@ local function CargoBox(cargo)
     local ok = pcall(function() cargo:GetActorBounds(true, centre, extent, false) end)
     centre, extent = centre.Origin or centre, extent.BoxExtent or extent
     if ok and centre.X and extent.X then
-        return centre, { X = extent.X + 10, Y = extent.Y + 10, Z = extent.Z + 10 }
+        return centre, { X = extent.X, Y = extent.Y, Z = extent.Z }
     end
     local at = cargo:K2_GetActorLocation()  -- bounds not available: a metre and a half around its origin
     return { X = at.X, Y = at.Y, Z = at.Z + 60 }, { X = 75, Y = 75, Z = 75 }
@@ -2433,7 +2623,7 @@ end
 local function IsOurMarker(marker)
     local ok, ours = pcall(function()
         local title = marker.MarkerData.WidgetTitle:ToString()
-        return title == TO_BOAT or title == TO_DOCK
+        return title == TO_BOAT or title == TO_DOCK or title == HINT_MARK or title == HINT_UNMARK
     end)
     return ok and ours
 end
@@ -2511,6 +2701,47 @@ local function UpdateMarkers()
     end
 end
 
+-- The hint. While a crane operator is on duty nearby, the piece you are looking at carries a small
+-- marker of its own saying what F5 will do with it: mark it, or take its mark off. It is the piece
+-- F5 acts on, so with stacked pieces you can see which one that is before pressing.
+HINT_RANGE_CM = 3000
+local Hint = nil  -- { cargo, title, actor }
+
+local function OperatorNearby(here)
+    for _, comp in ipairs(Live("SasBoatCrewComponent")) do
+        local ok, near = pcall(function()
+            local slot = CraneSlot(comp)
+            return slot and Valid(slot.CrewMember) and Dist(comp:GetOwner():K2_GetActorLocation(), here) < 10000
+        end)
+        if ok and near then return true end
+    end
+    return false
+end
+
+local function DropHint()
+    if Hint then pcall(function() Hint.actor:K2_DestroyActor() end) end
+    Hint = nil
+end
+
+local function UpdateHint()
+    local here = FindFirstOf("PlayerController").PlayerCameraManager:GetCameraLocation()
+    local cargo = OperatorNearby(here) and LookedAtCargo() or nil
+    if cargo and Dist(cargo:K2_GetActorLocation(), here) > HINT_RANGE_CM then cargo = nil end
+    if not cargo then
+        DropHint()
+        return
+    end
+    local guid = CargoGuid(cargo)
+    local title = (guid and Manual[guid]) and HINT_UNMARK or HINT_MARK
+    if Hint and Same(Hint.cargo, cargo) and Hint.title == title and Valid(Hint.actor) then return end
+    DropHint()
+    local ok, marker = pcall(SpawnMarker, cargo, title)
+    if ok and marker then
+        pcall(function() marker:K2_AddActorWorldOffset({ X = 0, Y = 0, Z = 120 }, false, {}, true) end)  -- above its other marker
+        Hint = { cargo = cargo, title = title, actor = marker }
+    end
+end
+
 local MarkWanted = false
 RegisterKeyBind(Key.F5, function()
     MarkWanted = true
@@ -2547,6 +2778,7 @@ LoopInGameThreadWithDelay(TICK_MS, function()
         MarkWanted = false
         local ok, err = pcall(ToggleMark)
         if not ok then Log("marking failed: " .. tostring(err):gsub("\n.*", "")) end
+        DropHint()
         pcall(UpdateMarkers)
     end
     if SpotWanted then
@@ -2555,6 +2787,7 @@ LoopInGameThreadWithDelay(TICK_MS, function()
         if not ok then Log("setting the spot failed: " .. tostring(err):gsub("\n.*", "")) end
     end
     if Ticks % 2 == 0 then pcall(UpdateMarkers) end
+    pcall(UpdateHint)
     if Ticks % 4 == 0 then
         pcall(EnsurePositions)
         pcall(TendPositions)
