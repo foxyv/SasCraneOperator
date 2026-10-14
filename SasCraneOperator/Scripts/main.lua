@@ -164,17 +164,32 @@ local function BuildPosition(comp, boat)
     if not Valid(group) then return false end
     local slot = StaticConstructObject(slotClass, group)
     if not Valid(slot) then return false end
+    -- A boat with crew positions of its own keeps them; the new group is added after them, and its
+    -- slot takes the next free number in the category so that it clashes with none of theirs.
+    local index = 0
+    comp.SlotMap:ForEach(function(key)
+        local id = key:get()
+        if Same(id.TaskGroupCategory, category) then index = math.max(index, id.SlotIndex + 1) end
+    end)
     group.BoatCrewComponent = comp
     group.CrewTaskCategory = category
     group.GroupName = FText(GROUP_NAME)
     slot.CrewGroup = group
-    slot.SlotId = { TaskGroupCategory = category, SlotIndex = 0 }
+    slot.SlotId = { TaskGroupCategory = category, SlotIndex = index }
     slot.PrimarySlot = slot
     slot.bAllowTaskAssignment = true
     group.CrewSlots = { slot }
-    comp.CrewTaskCategories = { category }
-    comp.CrewGroups = { group }
-    comp.SlotMap:Add({ TaskGroupCategory = category, SlotIndex = 0 }, slot)
+    local groups, categories, known = {}, {}, false
+    Each(comp.CrewGroups, function(existing) groups[#groups + 1] = existing end)
+    Each(comp.CrewTaskCategories, function(existing)
+        categories[#categories + 1] = existing
+        if Same(existing, category) then known = true end
+    end)
+    groups[#groups + 1] = group
+    if not known then categories[#categories + 1] = category end
+    comp.CrewTaskCategories = categories
+    comp.CrewGroups = groups
+    comp.SlotMap:Add({ TaskGroupCategory = category, SlotIndex = index }, slot)
     pcall(function()
         local info = boat:GetBoatInfo()
         if info.MaxCrewMembers < 1 then info.MaxCrewMembers = 1 end  -- lets a crew member be assigned to the boat
@@ -196,13 +211,13 @@ end
 
 local BuildFailed = {}
 
--- Cargo boats with no crew positions of their own get the position; boats that have crew are left alone.
+-- Every cargo boat gets the position, alongside any crew positions it has of its own.
 local function EnsurePositions()
     for _, comp in ipairs(Live("SasBoatCrewComponent")) do
         pcall(function()
             local boat = comp:GetOwner()
             if not Valid(boat) or not ClassName(boat):find("Cargo_Boat", 1, true) then return end
-            if Count(comp.CrewGroups) > 0 then return end
+            if CraneSlot(comp) then return end
             local key = boat:GetFullName()
             if BuildFailed[key] then return end
             local ok, built = pcall(BuildPosition, comp, boat)
@@ -220,12 +235,33 @@ end
 
 local RereadCharts
 
-local function Seat(member, slot)
+-- Someone moved here from one of the boat's own crew positions has to leave that one first: the game
+-- is asked to take them out of it, and if it does not, the link is cut by hand as well.
+local function LeaveOtherSlot(member, slot)
+    local old = nil
+    pcall(function() old = member.CrewSlot end)
+    if not Valid(old) or Same(old, slot) or IsOurSlot(old) then return end
+    for _, employee in ipairs(Live("CompanyEmployeeComponent")) do
+        pcall(function() employee:RemoveCrewMemberFromSlot(member) end)
+    end
+    if Same(old.CrewMember, member) then
+        ClearRef(old, "CrewMember")
+        pcall(function() old:OnRep_CrewMember(member) end)
+    end
+end
+
+-- Writes the link between a crew member and a slot on both sides and tells each side it changed.
+local function Link(member, slot)
     slot.CrewMember = member
     member.CrewSlot = slot
-    member.CrewSlotId = { TaskGroupCategory = slot.SlotId.TaskGroupCategory, SlotIndex = 0 }
+    member.CrewSlotId = { TaskGroupCategory = slot.SlotId.TaskGroupCategory, SlotIndex = slot.SlotId.SlotIndex }
     pcall(function() slot:OnRep_CrewMember(nil) end)
     pcall(function() member:OnRep_CrewSlot() end)
+end
+
+local function Seat(member, slot)
+    LeaveOtherSlot(member, slot)
+    Link(member, slot)
     Remember(MemberName(member), true)
     -- Without this the chart keeps showing them under "Resting" as well.
     pcall(function() RereadCharts(slot.CrewGroup.BoatCrewComponent) end)
@@ -279,11 +315,17 @@ end
 local ChartTries = {}
 
 local function TendPositions()
-    -- A chart that still shows no groups for a boat that now has the position reads the boat again.
+    -- A chart that does not show the position of a boat that now has it reads the boat again.
     for _, chart in ipairs(Live("SasCrewChartViewModel")) do
         pcall(function()
             local comp = chart:GetBoatCrewComponent()
-            if Valid(comp) and Count(chart.CrewGroups) == 0 and CraneSlot(comp) then
+            local shown = false
+            pcall(function()
+                Each(chart.CrewGroups, function(group)
+                    if group.GroupName:ToString() == GROUP_NAME then shown = true end
+                end)
+            end)
+            if Valid(comp) and not shown and CraneSlot(comp) then
                 local key = chart:GetAddress()
                 ChartTries[key] = (ChartTries[key] or 0) + 1
                 if ChartTries[key] > 3 then return end
@@ -300,7 +342,13 @@ local function TendPositions()
             local boat = comp:GetOwner()
             local member = slot.CrewMember
             if Valid(member) then
-                if not Same(member.Boat, boat) or not Same(member.CrewSlot, slot) then Unseat(slot, false) end
+                if not Same(member.Boat, boat) or not Same(member.CrewSlot, slot) then
+                    -- Moved to another of the boat's positions: they are no longer the crane operator,
+                    -- and are not to be put back here after a load.
+                    local elsewhere = false
+                    pcall(function() elsewhere = Valid(member.CrewSlot) and Same(member.Boat, boat) end)
+                    Unseat(slot, elsewhere)
+                end
                 return
             end
             Each(comp.CrewMembers, function(candidate)
@@ -326,7 +374,26 @@ end
 local function HandleRequest(request)
     if request.kind == "seat" then
         local member, slot = request.member, request.slot
-        if not Valid(member) or not IsOurSlot(slot) or Same(slot.CrewMember, member) then return end
+        if not Valid(member) or not Valid(slot) or Same(slot.CrewMember, member) then return end
+        if not IsOurSlot(slot) then
+            -- Into one of the boat's own positions. The game will not move someone out of the crane
+            -- position, so they are taken out of it here and the game is asked again.
+            if not IsOurSlot(member.CrewSlot) then return end
+            Unseat(member.CrewSlot, true)
+            -- Their slot label still names the crane position, and the game looks them up by it.
+            pcall(function() member.CrewSlotId = { TaskGroupCategory = CreateInvalidObject(), SlotIndex = 0 } end)
+            for _, employee in ipairs(Live("CompanyEmployeeComponent")) do
+                pcall(function() employee:AssignCrewMemberToSlot(member, slot) end)
+            end
+            -- If the game still refuses, the move is written by hand, the way the game would write it.
+            if not Same(member.CrewSlot, slot) and not Valid(slot.CrewMember) then
+                Link(member, slot)
+                Log(MemberName(member) .. " moved into the boat's own position by hand")
+            end
+            pcall(function() RereadCharts(slot.CrewGroup.BoatCrewComponent) end)
+            Toast(MemberName(member) .. " is off crane duty")
+            return
+        end
         if not Same(member.Boat, SlotBoat(slot)) then
             Toast("Assign " .. MemberName(member) .. " to this boat first")
             return
@@ -342,7 +409,57 @@ local function HandleRequest(request)
     end
 end
 
+-- A steadier hook. The deck crane sometimes lets a load go a moment after latching it, for the
+-- game's own operators too. A load that comes off within a second and a half of being latched, while
+-- you are at the controls, is latched again straight away. Letting go again soon after that is taken
+-- as meant, and honoured.
+local STEADY_SECONDS = 1.5
+local Latches = {}   -- crane address -> { cargo, at, caught }
+local Catches = {}   -- loads to latch again: { crane, cargo }
+
+local function DrivenByPlayer(crane)
+    local ok, yes = pcall(function()
+        return Same(crane.DriverComponent.Driver, FindFirstOf("PlayerController").Pawn)
+    end)
+    return ok and yes
+end
+
+local function OnLatched(crane)
+    if not ClassName(crane):find("T02", 1, true) then return end
+    local key = crane:GetAddress()
+    local previous = Latches[key]
+    local caught = previous and previous.caught and os.clock() - previous.caught < 5 and previous.caught or nil
+    Latches[key] = { cargo = crane.AttachedCargo, at = os.clock(), caught = caught }
+end
+
+local function OnLetGo(crane)
+    if not ClassName(crane):find("T02", 1, true) or not DrivenByPlayer(crane) then return end
+    local latch = Latches[crane:GetAddress()]
+    if not latch or not Valid(latch.cargo) or os.clock() - latch.at > STEADY_SECONDS then return end
+    if latch.caught then return end  -- already caught once: this time it is meant
+    latch.caught = os.clock()
+    Catches[#Catches + 1] = { crane = crane, cargo = latch.cargo }
+end
+
+local function SteadyStep()
+    if #Catches == 0 then return end
+    local catches = Catches
+    Catches = {}
+    for _, catch in ipairs(catches) do
+        pcall(function()
+            if Valid(catch.crane) and Valid(catch.cargo) and not Valid(catch.crane.AttachedCargo) then
+                catch.crane:ServerAttachCargo(catch.cargo)
+                Log("steadied the hook: the " .. ClassName(catch.cargo) .. " came off just after latching and was latched again")
+            end
+        end)
+    end
+end
+
+local CRANE_BASE = "/Game/ShipsAtSea/Gameplay/Cargo/Crane/BP_CargoCrane_Base.BP_CargoCrane_Base_C"
+
 local Hooks = {
+    [CRANE_BASE .. ":OnCargoAttached_Base"] = function(context) OnLatched(context:get()) end,
+    [CRANE_BASE .. ":OnCargoDetached_Base"] = function(context) OnLetGo(context:get()) end,
     ["/Script/Sas.SasCrewSlotViewModel:AssignCrewMemberToSlot"] = function(context, _, member)
         Queue("seat", member:get(), context:get():GetCrewSlot())
     end,
@@ -445,12 +562,35 @@ local function CargoGuid(cargo)
     return ok and guid or nil
 end
 
-local function FindPlace(area, cargo)
+-- Does the area take pieces of this size? Medium and large cargo go to different dock areas. If the
+-- game will not say, it is taken to.
+local function TakesSize(area, cargo)
+    local ok, takes = pcall(function()
+        return area:GetInventory():IsSupportedCargoSize(cargo:GetRepresentedInventoryItem().ItemDefinition.CargoSize)
+    end)
+    return not ok or takes ~= false
+end
+
+-- Does the game accept the piece at exactly this place in the area?
+local function FitsAt(area, cargo, place)
+    if not TakesSize(area, cargo) then return false end
+    local ok, found = pcall(function()
+        local out = {}
+        return area:GetInventory():FindPlaceForInventoryItemInGrid(cargo:GetRepresentedInventoryItem(), out,
+            { DesiredGridTransform = { position = place.position, Rotation = place.rotation }, PositionRule = 0, RotationRule = 0 }, {})
+    end)
+    return ok and found == true
+end
+
+-- A free place for the piece in the area: the first the game finds, counting from the grid's corner.
+-- (The game takes no notice of where it is asked to look.)
+local function FindPlace(area, cargo, near)
+    if not TakesSize(area, cargo) then return nil end
     local item = cargo:GetRepresentedInventoryItem()
-    local zero = { position = { X = 0, Y = 0, Z = 0 }, Rotation = { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 } }
+    local want = { position = near or { X = 0, Y = 0, Z = 0 }, Rotation = { Pitch = 0.0, Yaw = 0.0, Roll = 0.0 } }
     local out = {}
     local found = area:GetInventory():FindPlaceForInventoryItemInGrid(item, out,
-        { DesiredGridTransform = zero, PositionRule = 1, RotationRule = 1 }, {})
+        { DesiredGridTransform = want, PositionRule = 1, RotationRule = 1 }, {})
     out = out.OutGridTransform or out
     if not found or out.position == nil then return nil end
     return { position = { X = out.position.X, Y = out.position.Y, Z = out.position.Z },
@@ -469,7 +609,9 @@ local function IsDocked(boat)
     return math.sqrt(velocity.X ^ 2 + velocity.Y ^ 2) <= MAX_SPEED_CM
 end
 
--- Where the docked boat with a seated operator lies: its hold, the dock crane in reach, and the dock areas.
+-- Where the docked boat with a seated operator lies: its hold, the cranes that will do the work, and
+-- the dock areas. A boat with cranes of its own uses those (large-container docks have no crane of
+-- their own); any other uses the dock crane beside its hold.
 local function WorkSite(comp)
     local boat = comp:GetOwner()
     if not IsDocked(boat) then return nil end
@@ -478,6 +620,11 @@ local function WorkSite(comp)
         if not hold and IsHold(area) and Same(area:GetAttachParentActor(), boat) then hold = area end
     end
     if not hold then return nil end
+    local deck = {}
+    for _, candidate in ipairs(Live("CargoCrane")) do
+        if Same(candidate:GetAttachParentActor(), boat) then deck[#deck + 1] = candidate end
+    end
+    if #deck > 0 then return { boat = boat, hold = hold, cranes = deck, crane = deck[1], deck = true } end
     local at = hold:K2_GetActorLocation()
     local crane, craneDist = nil, CRANE_REACH_CM
     for _, candidate in ipairs(Live("CargoCrane")) do
@@ -485,10 +632,30 @@ local function WorkSite(comp)
         if d < craneDist and not Valid(candidate:GetAttachParentActor()) then crane, craneDist = candidate, d end
     end
     if not crane then return nil end
-    return { boat = boat, hold = hold, crane = crane }
+    return { boat = boat, hold = hold, cranes = { crane }, crane = crane, deck = false }
 end
 
--- Dock areas in the crane's reach, the port's own cargo area first.
+-- Where an area's grid sits in the world: its corner, and the directions its X and Y cells run in.
+local function GridFrame(area)
+    local origin = area.OriginComponent
+    local at, yaw = origin:K2_GetComponentLocation(), math.rad(origin:K2_GetComponentRotation().Yaw)
+    return at, { X = math.cos(yaw), Y = math.sin(yaw) }, { X = -math.sin(yaw), Y = math.cos(yaw) }
+end
+
+-- The floor cell of an area closest to a point, and that cell's centre in the world.
+local function CellNear(area, point)
+    local at, across, along = GridFrame(area)
+    local size = area:GetInventory().GridSize
+    local dx, dy = point.X - at.X, point.Y - at.Y
+    local gx = math.max(0, math.min(size.X - 1, math.floor((dx * across.X + dy * across.Y) / 25)))
+    local gy = math.max(0, math.min(size.Y - 1, math.floor((dx * along.X + dy * along.Y) / 25)))
+    local cx, cy = (gx + 0.5) * 25, (gy + 0.5) * 25
+    return { X = gx, Y = gy, Z = 0 }, { X = at.X + across.X * cx + along.X * cy, Y = at.Y + across.Y * cx + along.Y * cy, Z = at.Z }
+end
+
+-- Dock areas in the cranes' reach. With a dock crane, the port's own cargo area comes first; with the
+-- boat's own cranes, the areas closest to one of them, each with the cell nearest that crane, so
+-- that what is set down there stays within the arm's reach.
 local function DockAreas(site)
     local at = site.crane:K2_GetActorLocation()
     local areas = {}
@@ -496,8 +663,19 @@ local function DockAreas(site)
         if not IsHold(area) then
             local d = Dist(area:K2_GetActorLocation(), at)
             if d < CARGO_REACH_CM then
-                local rank = ClassName(area) == "BP_CargoArea_C" and 0 or 1
-                areas[#areas + 1] = { area = area, order = rank * 1e9 + d }
+                if site.deck then
+                    local best, near = math.huge, nil
+                    for _, crane in ipairs(site.cranes) do
+                        local ok, cell, centre = pcall(CellNear, area, crane:K2_GetActorLocation())
+                        if ok and Dist(centre, crane:K2_GetActorLocation()) < best then
+                            best, near = Dist(centre, crane:K2_GetActorLocation()), cell
+                        end
+                    end
+                    areas[#areas + 1] = { area = area, order = best, near = near }
+                else
+                    local rank = ClassName(area) == "BP_CargoArea_C" and 0 or 1
+                    areas[#areas + 1] = { area = area, order = rank * 1e9 + d }
+                end
             end
         end
     end
@@ -589,6 +767,273 @@ local function NextSettle(site)
     return nil
 end
 
+-- Making room. When a piece to load will not fit, a space is cleared for it the way a person would:
+-- pick the spot on the hold's floor where the fewest pieces are in the way, and move those pieces
+-- into gaps elsewhere on the floor. The moves are worked out on a copy of the hold's grid first, one
+-- after the other, so each is possible when its turn comes; if the pieces in the way of a spot
+-- cannot all be found a gap, the next spot is tried.
+
+local TIDY_ROUNDS = 3     -- plans made for one stuck piece before giving up
+local TidyPlan = {}       -- moves still to make: { cargo, place }
+local TidyRounds = 0
+local TidyTold = false
+local TidyReport = ""
+
+local function CellName(x, y, z)
+    return x .. "," .. y .. "," .. z
+end
+
+-- Every piece in an area as a box of cells: its corner, its size, and where the game anchors it.
+local function Boxes(area)
+    local inventory = area:GetInventory()
+    local boxes = {}
+    inventory.CellsOccupancyMap:ForEach(function(key, value)
+        local cell, item = key:get(), value:get()
+        if not Valid(item) then return end
+        local id = item:GetAddress()
+        local box = boxes[id]
+        if not box then
+            box = { id = id, low = { X = cell.X, Y = cell.Y, Z = cell.Z }, high = { X = cell.X, Y = cell.Y, Z = cell.Z } }
+            boxes[id] = box
+        end
+        for _, axis in ipairs({ "X", "Y", "Z" }) do
+            box.low[axis], box.high[axis] = math.min(box.low[axis], cell[axis]), math.max(box.high[axis], cell[axis])
+        end
+    end)
+    Each(inventory.GridInventoryItems.Entries, function(placed)
+        local box = Valid(placed.InventoryItem) and boxes[placed.InventoryItem:GetAddress()]
+        if box then
+            local at, turn = placed.GridTransform.position, placed.GridTransform.Rotation
+            box.anchor = { X = at.X - box.low.X, Y = at.Y - box.low.Y, Z = at.Z - box.low.Z }
+            box.rotation = { Pitch = turn.Pitch, Yaw = turn.Yaw, Roll = turn.Roll }
+        end
+    end)
+    for _, box in pairs(boxes) do
+        box.size = { X = box.high.X - box.low.X + 1, Y = box.high.Y - box.low.Y + 1, Z = box.high.Z - box.low.Z + 1 }
+    end
+    return boxes, inventory.GridSize
+end
+
+local function Fill(grid, box, with)
+    for x = box.low.X, box.low.X + box.size.X - 1 do
+        for y = box.low.Y, box.low.Y + box.size.Y - 1 do
+            for z = box.low.Z, box.low.Z + box.size.Z - 1 do
+                grid[CellName(x, y, z)] = with
+            end
+        end
+    end
+end
+
+local function Free(grid, x0, y0, size)
+    for x = x0, x0 + size.X - 1 do
+        for y = y0, y0 + size.Y - 1 do
+            for z = 0, size.Z - 1 do
+                if grid[CellName(x, y, z)] then return false end
+            end
+        end
+    end
+    return true
+end
+
+-- The first gap on the floor that takes a box of this size, or nil.
+local function FloorGap(grid, limit, size)
+    for y = 0, limit.Y - size.Y do
+        for x = 0, limit.X - size.X do
+            if Free(grid, x, y, size) then return x, y end
+        end
+    end
+    return nil
+end
+
+-- Works out the moves that clear a space for a piece of this size. Returns the list of moves, each
+-- { id, x, y }, in the order to make them, or nil if no spot can be cleared.
+local function PlanSpace(boxes, limit, want)
+    local best = nil
+    local shapes = { { X = want.X, Y = want.Y, Z = want.Z } }
+    if want.X ~= want.Y then shapes[2] = { X = want.Y, Y = want.X, Z = want.Z } end
+    for _, shape in ipairs(shapes) do
+        for y0 = 0, limit.Y - shape.Y do
+            for x0 = 0, limit.X - shape.X do
+                -- What stands in this spot, and everything standing on those pieces.
+                local inWay, queue = {}, {}
+                local function add(box)
+                    if not inWay[box.id] then
+                        inWay[box.id] = true
+                        queue[#queue + 1] = box
+                    end
+                end
+                for _, box in pairs(boxes) do
+                    if box.low.X < x0 + shape.X and box.high.X >= x0 and box.low.Y < y0 + shape.Y and box.high.Y >= y0 then add(box) end
+                end
+                local index = 1
+                while index <= #queue do
+                    local under = queue[index]
+                    index = index + 1
+                    for _, box in pairs(boxes) do
+                        if box.low.Z > under.low.Z and box.low.X <= under.high.X and box.high.X >= under.low.X
+                            and box.low.Y <= under.high.Y and box.high.Y >= under.low.Y then
+                            add(box)
+                        end
+                    end
+                end
+                if not best or #queue < #best then
+                    local ok = true
+                    for _, box in ipairs(queue) do
+                        if not box.anchor then ok = false end
+                    end
+                    -- Try it on a copy of the grid: top pieces first, bigger ones before smaller.
+                    local grid = {}
+                    for _, box in pairs(boxes) do Fill(grid, box, box.id) end
+                    for x = x0, x0 + shape.X - 1 do
+                        for y = y0, y0 + shape.Y - 1 do
+                            for z = 0, limit.Z - 1 do
+                                local key = CellName(x, y, z)
+                                grid[key] = grid[key] or "reserved"
+                            end
+                        end
+                    end
+                    table.sort(queue, function(a, b)
+                        if a.low.Z ~= b.low.Z then return a.low.Z > b.low.Z end
+                        return a.size.X * a.size.Y > b.size.X * b.size.Y
+                    end)
+                    local moves = {}
+                    for _, box in ipairs(queue) do
+                        if ok then
+                            Fill(grid, box, nil)
+                            for x = x0, x0 + shape.X - 1 do  -- its old cells inside the spot stay kept for the new piece
+                                for y = y0, y0 + shape.Y - 1 do
+                                    for z = 0, limit.Z - 1 do grid[CellName(x, y, z)] = grid[CellName(x, y, z)] or "reserved" end
+                                end
+                            end
+                            local x, y = FloorGap(grid, limit, box.size)
+                            if x then
+                                Fill(grid, { low = { X = x, Y = y, Z = 0 }, size = box.size }, box.id)
+                                moves[#moves + 1] = { id = box.id, x = x, y = y }
+                            else
+                                ok = false
+                            end
+                        end
+                    end
+                    if ok then
+                        best = moves
+                        if #best == 0 then return best end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
+
+-- Plans the clearing of a space in the hold for a piece that does not fit. True if there is a plan.
+local function PlanTidy(site, waiting)
+    if TidyRounds >= TIDY_ROUNDS then return false end
+    TidyRounds = TidyRounds + 1
+    local from = waiting.CargoArea
+    local theirs = Boxes(from)[waiting:GetRepresentedInventoryItem():GetAddress()]
+    if not theirs then return false end
+    local boxes, limit = Boxes(site.hold)
+    local moves = PlanSpace(boxes, { X = limit.X, Y = limit.Y, Z = limit.Z }, theirs.size)
+    local report = string.format("a %dx%dx%d piece does not fit: %s", theirs.size.X, theirs.size.Y, theirs.size.Z,
+        moves and (#moves .. " piece(s) to move aside") or "no spot can be cleared")
+    if report ~= TidyReport then
+        TidyReport = report
+        Log(report)
+    end
+    if not moves or #moves == 0 then return false end
+    local actors = {}
+    for _, cargo in ipairs(Live("HeavyCargo")) do
+        pcall(function() actors[cargo:GetRepresentedInventoryItem():GetAddress()] = cargo end)
+    end
+    TidyPlan = {}
+    for _, move in ipairs(moves) do
+        local box, cargo = boxes[move.id], actors[move.id]
+        if not cargo then
+            TidyPlan = {}
+            return false
+        end
+        TidyPlan[#TidyPlan + 1] = { cargo = cargo, place = {
+            position = { X = move.x + box.anchor.X, Y = move.y + box.anchor.Y, Z = box.anchor.Z },
+            rotation = box.rotation } }
+    end
+    return true
+end
+
+local function NextTidy(site, waiting)
+    if #TidyPlan == 0 and not PlanTidy(site, waiting) then return nil end
+    local step = table.remove(TidyPlan, 1)
+    if not Valid(step.cargo) or not Same(step.cargo.CargoArea, site.hold) then
+        TidyPlan = {}
+        return nil
+    end
+    return { cargo = step.cargo, to = site.hold, place = step.place, settle = true, tidy = true }
+end
+
+local CELL_SIZE_CM = 25
+local CanReach  -- (site, move) -> true if one of the site's cranes can be steered to both places
+local Unreachable = {}  -- cargo guid -> true for pieces the boat's own cranes cannot get to; left alone
+
+-- A piece with others standing on it is not pulled out from under them. The topmost piece standing on
+-- it is first moved aside, to a gap on the floor of the same area away from the piece, or failing
+-- that wherever the game finds room that is not on top of it again. Nil when nothing is on it.
+local function ClearAbove(site, cargo)
+    local area = cargo.CargoArea
+    if not Valid(area) then return nil end
+    local boxes, limit = Boxes(area)
+    local target = boxes[cargo:GetRepresentedInventoryItem():GetAddress()]
+    if not target then return nil end
+    local function over(box, under)
+        return box.low.Z > under.low.Z and box.low.X <= under.high.X and box.high.X >= under.low.X
+            and box.low.Y <= under.high.Y and box.high.Y >= under.low.Y
+    end
+    local top = nil
+    for _, box in pairs(boxes) do
+        if box ~= target and over(box, target) and box.anchor and (not top or box.high.Z > top.high.Z) then top = box end
+    end
+    if not top then return nil end
+    local actor = nil
+    for _, candidate in ipairs(Live("HeavyCargo")) do
+        pcall(function()
+            if candidate:GetRepresentedInventoryItem():GetAddress() == top.id then actor = candidate end
+        end)
+    end
+    if not actor then return nil end
+    if Unreachable[CargoGuid(actor) or "?"] then return "blocked" end  -- what is on it cannot be moved
+
+    local grid = {}
+    for _, box in pairs(boxes) do Fill(grid, box, box.id) end
+    for x = target.low.X, target.high.X do  -- keep the piece's own column clear
+        for y = target.low.Y, target.high.Y do
+            for z = 0, limit.Z - 1 do grid[CellName(x, y, z)] = grid[CellName(x, y, z)] or "kept" end
+        end
+    end
+    Fill(grid, top, nil)
+    local place = nil
+    local x, y = FloorGap(grid, { X = limit.X, Y = limit.Y, Z = limit.Z }, top.size)
+    if x then
+        place = { position = { X = x + top.anchor.X, Y = y + top.anchor.Y, Z = top.anchor.Z }, rotation = top.rotation }
+    else
+        local offered = FindPlace(area, actor)
+        if offered then
+            local p = offered.position
+            local onIt = p.X <= target.high.X and p.X + top.size.X - 1 >= target.low.X
+                and p.Y <= target.high.Y and p.Y + top.size.Y - 1 >= target.low.Y
+            if not onIt then place = offered end
+        end
+    end
+    if not place then return nil end
+    Log("moving a " .. ClassName(actor) .. " off the " .. ClassName(cargo) .. " it stands on")
+    return { cargo = actor, to = area, place = place, settle = true, tidy = true }
+end
+
+local PLACES_TRIED = 16  -- free spots tried, nearest a crane first, when looking for a place in reach
+local PlaceInReach  -- (site, area, cargo) -> a place in the area a crane can reach with the piece,
+                    -- or nil and a hand-over move when the neatest place is the other crane's
+local Relayed = {}  -- cargo guid -> true once handed over, so a piece is never passed back and forth
+local NeedsStaging  -- (site, cargo) -> true if a piece to load stands where no crane of the site gets to it
+local STAGE_RANGE_CM = 100000  -- pieces to load this close to the boat are brought to its dock
+local Relay         -- (site, cargo, docks) -> a move across the hold to where the other crane can unload it
+
 -- The next piece to move: unloading first, so that the hold has room for what is loaded after, and
 -- from the top of a stack down, so that as little as possible is left hanging.
 local function NextMove(site, load, unload)
@@ -598,10 +1043,10 @@ local function NextMove(site, load, unload)
         local guid = CargoGuid(cargo)
         local area = nil
         pcall(function() area = cargo.CargoArea end)
-        if guid and Valid(area) then
+        if guid and Valid(area) and not Unreachable[guid] then
             if unload[guid] and Same(area, site.hold) then
                 toUnload[#toUnload + 1] = cargo
-            elseif load[guid] and not IsHold(area) and Dist(cargo:K2_GetActorLocation(), at) < CARGO_REACH_CM then
+            elseif load[guid] and not IsHold(area) and Dist(cargo:K2_GetActorLocation(), at) < STAGE_RANGE_CM then
                 toLoad[#toLoad + 1] = cargo
             end
         end
@@ -611,22 +1056,68 @@ local function NextMove(site, load, unload)
     table.sort(toLoad, topFirst)
     local docks = #toUnload > 0 and DockAreas(site) or {}
     for _, cargo in ipairs(toUnload) do
-        for _, dock in ipairs(docks) do
-            local place = FindPlace(dock.area, cargo)
-            if place then return { cargo = cargo, to = dock.area, place = place } end
+        local ok, clear = pcall(ClearAbove, site, cargo)
+        if ok and clear and clear ~= "blocked" then return clear end
+        if not (ok and clear == "blocked") then
+            local fallback = nil
+            for _, dock in ipairs(docks) do
+                local place, handOver = PlaceInReach(site, dock.area, cargo)
+                if handOver then return handOver end
+                if place then
+                    local move = { cargo = cargo, to = dock.area, place = place }
+                    if not site.deck or CanReach(site, move) then return move end
+                    fallback = fallback or move
+                end
+            end
+            if site.deck then
+                -- Neither crane can take it straight to the dock: perhaps one can bring it across the
+                -- hold to where the other can.
+                local ok2, relay = pcall(Relay, site, cargo, docks)
+                if not ok2 then Log("planning a hand-over failed: " .. tostring(relay):gsub("\n.*", "")) end
+                if ok2 and relay then return relay end
+            end
+            if fallback then return fallback end
+        end
+    end
+    -- A piece the warehouse put out in a dock area the cranes do not get to is first brought to the
+    -- dock area by the boat, the way the warehouse would have put it there.
+    for _, cargo in ipairs(toLoad) do
+        local ok, needs = pcall(NeedsStaging, site, cargo)
+        if ok and needs then
+            for _, dock in ipairs(DockAreas(site)) do
+                if not Same(dock.area, cargo.CargoArea) then
+                    local place = PlaceInReach(site, dock.area, cargo)
+                    if place then return { cargo = cargo, to = dock.area, place = place, settle = true, stage = true } end
+                end
+            end
         end
     end
     for _, cargo in ipairs(toLoad) do
-        local place = FindPlace(site.hold, cargo)
-        if place then return { cargo = cargo, to = site.hold, place = place } end
+        local ok, clear = pcall(ClearAbove, site, cargo)
+        if ok and clear and clear ~= "blocked" then return clear end
+        if not (ok and clear == "blocked") then
+            local place, handOver = PlaceInReach(site, site.hold, cargo)
+            if handOver then return handOver end
+            if place then
+                TidyRounds, TidyTold, TidyPlan = 0, false, {}
+                return { cargo = cargo, to = site.hold, place = place }
+            end
+        end
     end
-    if #toLoad > 0 then return nil, "no room in the hold" end
+    if #toLoad > 0 then
+        local ok, tidy = pcall(NextTidy, site, toLoad[1])
+        if not ok then Log("planning room in the hold failed: " .. tostring(tidy):gsub("\n.*", "")) end
+        if ok and tidy then return tidy end
+        return nil, "no room in the hold"
+    end
+    TidyRounds = 0
     if #toUnload > 0 then return nil, "no room on the dock" end
     return nil
 end
 
-local Manual = {}        -- cargo guid -> true, for pieces marked by hand with F5
+local Manual = {}        -- cargo guid -> "load" or "unload", for pieces marked by hand with F5
 local Job = nil          -- the piece being moved, see StartJob
+local Failed = {}        -- cargo guid -> times the crane could not keep it on the hook
 local Rest = 0           -- ticks until the operator starts the next piece
 local Working = false    -- was there work when last looked
 local Moved = 0
@@ -811,22 +1302,17 @@ local function SetSpotHere()
 end
 
 ---------------------------------------------------------------------------------------------------
--- Moving the crane. The stationary dock crane has four joints that matter here, each of which goes
--- smoothly to whatever value it is given: the platform swivels (degrees), the boom is hoisted
--- (degrees, 0 to 50), the boom telescopes (0 to 230, two centimetres a unit) and the cable drum pays
--- out (centimetres, 10 to 1000). The figures below were measured on the crane in game: the boom is
--- 445 cm long from a pivot 25 cm behind and 335 cm above the crane's origin, and lies 2.1 degrees
--- below level at hoist 0; the hook hangs 53 cm plus the paid-out cable below the boom's tip.
+-- Moving the crane. Each kind of crane is a set of joints, each of which goes smoothly to whatever
+-- value it is given, and a model of where those values put the end of its arm. The figures were
+-- measured in game by moving one joint at a time.
 
 local CELL_CM = 25
-local BOOM_CM, BOOM_BACK_CM, BOOM_UP_CM, BOOM_DROOP_DEG = 445, 25, 335, 2.1
-local TELESCOPE_CM_PER_UNIT, TELESCOPE_MAX, HOIST_MAX = 2, 230, 50
-local HOOK_BELOW_TIP_CM, DRUM_MIN, DRUM_MAX = 53, 10, 1000
-local JOINT = { swivel = "Joint_SwivelPlatform", hoist = "Joint_BoomHoist", telescope = "Joint_TelescopicBoom", drum = "Joint_CableDrum" }
-local SPEED = { swivel = 35, hoist = 20, telescope = 90, drum = 120 }   -- units a second
-local CLOSE = { swivel = 1.5, hoist = 1.0, telescope = 4, drum = 8 }    -- near enough to count as there
-local PARKED = { swivel = 0, hoist = 0, telescope = 0, drum = DRUM_MIN }
+local DRUM_MIN, DRUM_MAX = 10, 1000
 local PHASE_SECONDS = 12  -- a step that has not finished by then is given up on and the next one starts
+-- The deck crane latches a piece with its hook joint this far above the piece's lifting point, as
+-- the game's own operators do. Latching pulls the piece up to the hook; from much lower it would still
+-- sit in its place, and the game would set it straight back down.
+local HOOK_ON_LIFT_CM = 55
 
 local function Turn(degrees)  -- into -180 .. 180
     return (degrees + 180) % 360 - 180
@@ -836,13 +1322,26 @@ local function Clamp(value, low, high)
     return math.max(low, math.min(high, value))
 end
 
--- Does this crane have the joints the figures above describe?
-local function CanSteer(crane)
-    return ClassName(crane):find("StationaryCrane_T01", 1, true) ~= nil and Valid(crane[JOINT.swivel]) and Valid(crane[JOINT.drum])
-end
+-- The stationary dock crane (T01). The platform swivels (degrees, all the way round), the boom is
+-- hoisted (degrees, 0 to 50), the boom telescopes (0 to 230, two centimetres a unit) and the cable
+-- drum pays out (centimetres). The boom is 445 cm long from a pivot 25 cm behind and 335 cm above the
+-- crane's origin and lies 2.1 degrees below level at hoist 0; the hook hangs 53 cm plus the paid-out
+-- cable below its tip. The boom's height follows from its reach, so the height asked for is ignored.
+local BOOM_CM, BOOM_BACK_CM, BOOM_UP_CM, BOOM_DROOP_DEG = 445, 25, 335, 2.1
+local TELESCOPE_CM_PER_UNIT, TELESCOPE_MAX, HOIST_MAX = 2, 230, 50
 
--- The swivel, hoist and telescope that put the boom's tip over a point, and how high the tip then is.
-local function Reach(crane, point)
+local DockCrane = {
+    match = "StationaryCrane_T01",
+    joints = { swivel = "Joint_SwivelPlatform", hoist = "Joint_BoomHoist", telescope = "Joint_TelescopicBoom", drum = "Joint_CableDrum",
+               turn = "Joint_HookRotator" },
+    speed = { swivel = 35, hoist = 20, telescope = 90, drum = 120, turn = 60 },   -- units a second
+    close = { swivel = 1.5, hoist = 1.0, telescope = 4, drum = 8, turn = 2 },     -- near enough to count as there
+    parked = { swivel = 0, hoist = 0, telescope = 0, drum = DRUM_MIN },
+    wraps = true,
+    hookBelow = 53,
+}
+
+function DockCrane.Arm(crane, point)
     local base, yaw = crane:K2_GetActorLocation(), crane:K2_GetActorRotation().Yaw
     local dx, dy = point.X - base.X, point.Y - base.Y
     local out = math.sqrt(dx * dx + dy * dy)
@@ -856,24 +1355,102 @@ local function Reach(crane, point)
     end
     local length = BOOM_CM + telescope * TELESCOPE_CM_PER_UNIT
     local tipZ = base.Z + BOOM_UP_CM + length * math.sin(math.rad(hoist - BOOM_DROOP_DEG))
-    return { swivel = Turn(math.deg(math.atan(dy, dx)) - yaw), hoist = hoist, telescope = telescope }, tipZ
+    return { pose = { swivel = Turn(math.deg(math.atan(dy, dx)) - yaw), hoist = hoist, telescope = telescope }, tipZ = tipZ }
 end
 
--- The whole pose that puts the hook at a point.
-local function HookAt(crane, point)
-    local pose, tipZ = Reach(crane, point)
-    pose.drum = Clamp(tipZ - HOOK_BELOW_TIP_CM - point.Z, DRUM_MIN, DRUM_MAX)
-    return pose
+-- The knuckle-boom deck crane (T02) on the class 3 cargo ship. The platform swivels (degrees, stopping
+-- at half a turn either way). The lower arm pivots 20 cm behind and 266 cm above the crane's origin,
+-- is 268.5 cm long and stands at 33.2 degrees plus 42.2 for each unit of hoist (it rests on its stop
+-- at 7.3 degrees below hoist -0.6). The upper arm, from the knuckle to its end, is 359 cm plus 792 for
+-- each unit of telescope (1118 at most), set at 48 degrees below the lower arm plus 50 for each unit
+-- of bend. The hook hangs 47 cm to the left of the arm, 3 cm beyond its end and 78 cm plus the
+-- paid-out cable below it.
+local KNUCKLE = { pivotBack = 20, pivotUp = 266, lower = 268.5, lowerAt = 33.2, lowerPerUnit = 42.2, lowerMin = 7.3,
+                  upper = 359, upperPerUnit = 792, upperMax = 1118, bendAt = -48, bendPerUnit = 50,
+                  side = 47, ahead = 3 }
+
+local DeckCrane = {
+    match = "StationaryCrane_T02",
+    joints = { swivel = "Joint_SwivelPlatform", hoist = "Joint_BoomHoist", bend = "Joint_UpperArmBender",
+               telescope = "Joint_TelescopicBoom", drum = "Joint_CableDrum", turn = "Joint_HookRotator" },
+    speed = { swivel = 30, hoist = 0.6, bend = 0.6, telescope = 0.25, drum = 120, turn = 60 },
+    close = { swivel = 1.5, hoist = 0.02, bend = 0.02, telescope = 0.01, drum = 8, turn = 2 },
+    parked = { swivel = 0, hoist = 0, bend = 0, telescope = 0, drum = DRUM_MIN },
+    wraps = false,
+    hookBelow = 78,
+    feel = true,
+    -- The arm's end is at least this high above the crane's foot while it swings, with the hook up:
+    -- a load then hangs clear of the cargo on deck. The arm keeps its reach while it rises, so a load
+    -- is not pulled in against the crane.
+    travelUp = 700,
+}
+
+-- The joints that put the arm's end over a point with the end at a height; nil if it cannot reach.
+-- The arm is kept as short as will do, and the height is moved up or down a little if need be.
+function DeckCrane.Arm(crane, point, tipZ)
+    local k = KNUCKLE
+    local base, yaw = crane:K2_GetActorLocation(), crane:K2_GetActorRotation().Yaw
+    local dx, dy = point.X - base.X, point.Y - base.Y
+    local out = math.sqrt(dx * dx + dy * dy)
+    if out <= k.side + 1 then return nil end
+    local hookOut = math.sqrt(out * out - k.side * k.side)
+    local swivel = Turn(math.deg(math.atan(dy, dx)) - math.deg(math.atan(k.side, hookOut)) - yaw)
+    if math.abs(swivel) > 179 then return nil end
+    local reach = hookOut - k.ahead
+    local tryHeights = { 0, 50, 100, 150, 200, 250, 300, -50, -100, -150 }
+    for _, lift in ipairs(tryHeights) do
+        local up = (tipZ or point.Z + 200) - base.Z + lift
+        if base.Z + up - DeckCrane.hookBelow - DRUM_MIN >= point.Z - 1 then  -- the hook must still get as high as the point
+            local fx, fz = reach + k.pivotBack, up - k.pivotUp
+            local d = math.sqrt(fx * fx + fz * fz)
+            local telescope = 0
+            while telescope <= (k.upperMax - k.upper) / k.upperPerUnit + 1e-6 do
+                local upper = k.upper + telescope * k.upperPerUnit
+                if d <= k.lower + upper and d >= math.abs(k.lower - upper) then
+                    local cosA = (k.lower * k.lower + d * d - upper * upper) / (2 * k.lower * d)
+                    local lower = math.deg(math.atan(fz, fx) + math.acos(Clamp(cosA, -1, 1)))
+                    local kx = -k.pivotBack + k.lower * math.cos(math.rad(lower))
+                    local kz = k.pivotUp + k.lower * math.sin(math.rad(lower))
+                    local upperAngle = math.deg(math.atan(up - kz, reach - kx))
+                    local hoist = (lower - k.lowerAt) / k.lowerPerUnit
+                    local bend = (upperAngle - lower - k.bendAt) / k.bendPerUnit
+                    if lower >= k.lowerMin and hoist <= 1 and bend >= -1 and bend <= 1 then
+                        return { pose = { swivel = swivel, hoist = math.max(hoist, -1), bend = bend, telescope = telescope },
+                                 tipZ = base.Z + up }
+                    end
+                end
+                telescope = telescope + 0.02
+            end
+        end
+    end
+    return nil
 end
 
-local Steer = nil  -- { crane, goal = { swivel, hoist, telescope, drum } }: where the joints are being taken
+local Models = { DockCrane, DeckCrane }
 
-local function There(crane, goal)
-    for part, name in pairs(JOINT) do
+local function ModelOf(crane)
+    local name = ClassName(crane)
+    for _, model in ipairs(Models) do
+        if name:find(model.match, 1, true) and Valid(crane[model.joints.swivel]) and Valid(crane[model.joints.drum]) then
+            return model
+        end
+    end
+    return nil
+end
+
+-- How much cable puts the hook at a height, below an arm end at another.
+local function DrumFor(model, tipZ, hookZ)
+    return Clamp(tipZ - model.hookBelow - hookZ, DRUM_MIN, DRUM_MAX)
+end
+
+local Steer = nil  -- { crane, model, goal }: where the joints are being taken
+
+local function There(crane, model, goal)
+    for part, name in pairs(model.joints) do
         if goal[part] ~= nil then
             local off = goal[part] - crane[name]:GetCurrentValue()
-            if part == "swivel" then off = Turn(off) end
-            if math.abs(off) > CLOSE[part] then return false end
+            if part == "swivel" and model.wraps then off = Turn(off) end
+            if math.abs(off) > model.close[part] then return false end
         end
     end
     return true
@@ -887,26 +1464,20 @@ local function SteerStep()
         Steer = nil
         return
     end
-    for part, name in pairs(JOINT) do
+    for part, name in pairs(s.model.joints) do
         if s.goal[part] ~= nil then
             local joint = s.crane[name]
             local now = joint:GetCurrentValue()
             local off = s.goal[part] - now
-            if part == "swivel" then off = Turn(off) end
-            local step = SPEED[part] * MOTION_MS / 1000 * 2  -- aimed a little ahead: the joint eases towards it
+            local wraps = part == "swivel" and s.model.wraps
+            if wraps then off = Turn(off) end
+            local step = s.model.speed[part] * MOTION_MS / 1000 * 2  -- aimed a little ahead: the joint eases towards it
             local to = now + Clamp(off, -step, step)
-            if part == "swivel" then to = Turn(to) end
+            if wraps then to = Turn(to) end
             joint:SetTargetValue(to)
         end
     end
-    if There(s.crane, s.goal) then Steer = nil end
-end
-
--- Where an area's grid sits in the world: its corner, and the directions its X and Y cells run in.
-local function GridFrame(area)
-    local origin = area.OriginComponent
-    local at, yaw = origin:K2_GetComponentLocation(), math.rad(origin:K2_GetComponentRotation().Yaw)
-    return at, { X = math.cos(yaw), Y = math.sin(yaw) }, { X = -math.sin(yaw), Y = math.cos(yaw) }
+    if There(s.crane, s.model, s.goal) then Steer = nil end
 end
 
 -- The cell a piece stands on in its area and how many cells it covers each way.
@@ -930,53 +1501,452 @@ local function Footing(area, cargo)
     return { Z = low.Z, across = high.X - low.X + 1, along = high.Y - low.Y + 1, yaw = yaw }
 end
 
--- Works out where the hook has to go to pick the piece up and to set it down, and starts the crane
--- towards it. A crane this mod cannot steer, or a piece it cannot place in the world, is moved the
--- plain way: lifted where it stands and set down a few seconds later.
-local function StartJob(site, move)
-    local crane, cargo = site.crane, move.cargo
-    local job = { crane = crane, cargo = cargo, to = move.to, place = move.place, settle = move.settle,
-                  guid = CargoGuid(cargo), phase = "plain", ticks = 0 }
-    local ok = pcall(function()
-        if not CanSteer(crane) then return end
-        local from = cargo.CargoArea
-        local footing = Footing(from, cargo)
-        if not footing then return end
-        local hookAt = cargo:K2_GetActorLocation()
-        local top = hookAt.Z + 120
-        pcall(function()
-            local hook = cargo.CargoHook:K2_GetComponentLocation()
-            hookAt, top = { X = hook.X, Y = hook.Y, Z = hook.Z }, hook.Z
-        end)
-        local fromAt = GridFrame(from)
-        local hookUp = top - (fromAt.Z + footing.Z * CELL_CM)   -- the hook's height above the piece's foot
-
-        local toAt, across, along = GridFrame(move.to)
-        local wide, long = footing.across, footing.along
-        if math.abs(Turn(move.place.rotation.Yaw - footing.yaw)) > 45 and math.abs(Turn(move.place.rotation.Yaw - footing.yaw)) < 135 then
-            wide, long = long, wide  -- set down turned a quarter
-        end
-        local gx, gy = (move.place.position.X + wide / 2) * CELL_CM, (move.place.position.Y + long / 2) * CELL_CM
-        job.pick = { X = hookAt.X, Y = hookAt.Y, Z = top + 15 }  -- just above it, not pressing on it
-        job.drop = { X = toAt.X + across.X * gx + along.X * gy, Y = toAt.Y + across.Y * gx + along.Y * gy,
-                     Z = toAt.Z + move.place.position.Z * CELL_CM + hookUp }
-        job.phase = "clear"
+-- Where the hook has to be to take the piece where it stands, and to set it down in its new place.
+local function JobPoints(move)
+    local cargo = move.cargo
+    local from = cargo.CargoArea
+    local footing = Footing(from, cargo)
+    if not footing then return nil end
+    local hookAt = cargo:K2_GetActorLocation()
+    local top = hookAt.Z + 120
+    pcall(function()
+        local hook = cargo.CargoHook:K2_GetComponentLocation()
+        hookAt, top = { X = hook.X, Y = hook.Y, Z = hook.Z }, hook.Z
     end)
-    if not ok then job.phase = "plain" end
+    local fromAt = GridFrame(from)
+    local hookUp = top - (fromAt.Z + footing.Z * CELL_CM)   -- the hook's height above the piece's foot
+
+    local toAt, across, along = GridFrame(move.to)
+    local wide, long = footing.across, footing.along
+    if math.abs(Turn(move.place.rotation.Yaw - footing.yaw)) > 45 and math.abs(Turn(move.place.rotation.Yaw - footing.yaw)) < 135 then
+        wide, long = long, wide  -- set down turned a quarter
+    end
+    local gx, gy = (move.place.position.X + wide / 2) * CELL_CM, (move.place.position.Y + long / 2) * CELL_CM
+    local pick = { X = hookAt.X, Y = hookAt.Y, Z = top + 15 }  -- just above it, not pressing on it
+    local drop = { X = toAt.X + across.X * gx + along.X * gy, Y = toAt.Y + across.Y * gx + along.Y * gy,
+                   Z = toAt.Z + move.place.position.Z * CELL_CM + hookUp }
+    return pick, drop
+end
+
+-- How high the arm's end travels: high enough for the hook to clear both places by a metre, and for
+-- a crane that says so, no lower than its travelling height.
+local function TravelTip(model, pick, drop, crane)
+    local tip = math.max(pick.Z, drop.Z) + 100 + model.hookBelow + DRUM_MIN
+    if model.travelUp and crane then tip = math.max(tip, crane:K2_GetActorLocation().Z + model.travelUp) end
+    return tip
+end
+
+-- The crane to do a move. A dock crane is the only one there is; of a boat's own cranes, the one that
+-- can reach both places, preferring the one the operator is already sitting in and then the nearer.
+-- The second answer is false when no crane can be steered there and the piece is moved the plain way.
+local function ChooseCrane(site, move, character)
+    if not site.deck then return site.crane, ModelOf(site.crane) ~= nil end
+    local ok, pick, drop = pcall(JobPoints, move)
+    local best, bestScore, nearest, nearestDist = nil, math.huge, nil, math.huge
+    for _, crane in ipairs(site.cranes) do
+        local driver = CraneDriver(crane)
+        if (not driver or Same(driver, character)) and crane:IsPowered() then
+            local model = ModelOf(crane)
+            local at = crane:K2_GetActorLocation()
+            if ok and pick then
+                local d = Dist(at, pick) + Dist(at, drop)
+                if d < nearestDist then nearest, nearestDist = crane, d end
+                if model then
+                    local tip = TravelTip(model, pick, drop, crane)
+                    if model.Arm(crane, pick, tip) and model.Arm(crane, drop, tip) then
+                        local score = d - ((AtCrane and Same(AtCrane.crane, crane)) and 500 or 0)
+                        if score < bestScore then best, bestScore = crane, score end
+                    end
+                end
+            elseif not nearest then
+                nearest = crane
+            end
+        end
+    end
+    if best then return best, true end
+    if not ok or not pick then
+        Log("no crane can be steered for this move: its places could not be worked out (" .. tostring(pick):gsub("\n.*", "") .. ")")
+    else
+        Log(string.format("no crane can reach both places for this move: pick-up %.0f %.0f %.0f, set-down %.0f %.0f %.0f",
+            pick.X, pick.Y, pick.Z, drop.X, drop.Y, drop.Z))
+    end
+    return nearest, false
+end
+
+CanReach = function(site, move)
+    local ok, pick, drop = pcall(JobPoints, move)
+    if not ok or not pick then return false end
+    for _, crane in ipairs(site.cranes) do
+        local model = ModelOf(crane)
+        if model then
+            local tip = TravelTip(model, pick, drop, crane)
+            if model.Arm(crane, pick, tip) and model.Arm(crane, drop, tip) then return true end
+        end
+    end
+    return false
+end
+
+-- Where the hook takes a piece where it stands now.
+local function PickPoint(cargo)
+    local ok, at = pcall(function() return cargo.CargoHook:K2_GetComponentLocation() end)
+    if not ok or not at then at = cargo:K2_GetActorLocation() end
+    return { X = at.X, Y = at.Y, Z = at.Z + 15 }
+end
+
+-- Can this crane be steered to both points with a load?
+local function Reaches(crane, a, b)
+    local model = ModelOf(crane)
+    if not model then return false end
+    local tip = TravelTip(model, a, b, crane)
+    return model.Arm(crane, a, tip) ~= nil and model.Arm(crane, b, tip) ~= nil
+end
+
+-- The free spots in an area that take the piece the way it stands now, each with its place in the
+-- grid, its middle in the world, and how neat it is:
+--   * on the floor, the share of the spot's edge that is up against another piece or the area's side,
+--     so that pieces go in rows and blocks, not scattered with gaps between;
+--   * on top of a piece of exactly the same size, squarely, which is neater still.
+local NEAT_STACK = 1.1
+
+local function FreeSpots(area, cargo)
+    local mine = Boxes(cargo.CargoArea)[cargo:GetRepresentedInventoryItem():GetAddress()]
+    if not mine or not mine.anchor then return {} end
+    local size = { X = mine.size.X, Y = mine.size.Y, Z = mine.size.Z }
+    local boxes, limit = Boxes(area)
+    local grid = {}
+    for _, box in pairs(boxes) do
+        if box.id ~= mine.id then Fill(grid, box, box.id) end
+    end
+    local at, across, along = GridFrame(area)
+    local function centreOf(x, y)
+        local cx, cy = (x + size.X / 2) * CELL_SIZE_CM, (y + size.Y / 2) * CELL_SIZE_CM
+        return { X = at.X + across.X * cx + along.X * cy, Y = at.Y + across.Y * cx + along.Y * cy }
+    end
+    local function blocked(x, y)
+        return x < 0 or y < 0 or x >= limit.X or y >= limit.Y or grid[CellName(x, y, 0)] ~= nil
+    end
+    local spots = {}
+    for y = 0, limit.Y - size.Y do
+        for x = 0, limit.X - size.X do
+            if Free(grid, x, y, size) then
+                local touching, edge = 0, 2 * (size.X + size.Y)
+                for i = 0, size.X - 1 do
+                    if blocked(x + i, y - 1) then touching = touching + 1 end
+                    if blocked(x + i, y + size.Y) then touching = touching + 1 end
+                end
+                for j = 0, size.Y - 1 do
+                    if blocked(x - 1, y + j) then touching = touching + 1 end
+                    if blocked(x + size.X, y + j) then touching = touching + 1 end
+                end
+                spots[#spots + 1] = {
+                    place = { position = { X = x + mine.anchor.X, Y = y + mine.anchor.Y, Z = mine.anchor.Z }, rotation = mine.rotation },
+                    centre = centreOf(x, y),
+                    neat = touching / edge,
+                }
+            end
+        end
+    end
+    -- Squarely on top of a piece the same size with nothing on it yet, if the area is tall enough.
+    for _, box in pairs(boxes) do
+        if box.id ~= mine.id and box.size.X == size.X and box.size.Y == size.Y and box.high.Z + size.Z < limit.Z then
+            local z, clear = box.high.Z + 1, true
+            for i = box.low.X, box.high.X do
+                for j = box.low.Y, box.high.Y do
+                    for k = z, z + size.Z - 1 do
+                        if grid[CellName(i, j, k)] then clear = false end
+                    end
+                end
+            end
+            if clear then
+                spots[#spots + 1] = {
+                    place = { position = { X = box.low.X + mine.anchor.X, Y = box.low.Y + mine.anchor.Y, Z = z + mine.anchor.Z },
+                              rotation = mine.rotation },
+                    centre = centreOf(box.low.X, box.low.Y),
+                    neat = NEAT_STACK,
+                }
+            end
+        end
+    end
+    return spots
+end
+
+-- The neatest spots within a crane's reach of it, closest first among the equally neat.
+local NEAT_REACH_CM = 1300
+
+local function Neatest(spots, at, count)
+    local ranked = {}
+    for _, spot in ipairs(spots) do
+        local d = Dist(spot.centre, at)
+        if d <= NEAT_REACH_CM then ranked[#ranked + 1] = { spot = spot, d = d } end
+    end
+    table.sort(ranked, function(a, b)
+        local na, nb = math.floor(a.spot.neat * 20), math.floor(b.spot.neat * 20)  -- neatness in steps of 5 %
+        if na ~= nb then return na > nb end
+        return a.d < b.d
+    end)
+    local out = {}
+    for index = 1, math.min(#ranked, count) do out[index] = ranked[index].spot end
+    return out
+end
+
+local function Nearest(spots, at, count)
+    local ranked = {}
+    for _, spot in ipairs(spots) do ranked[#ranked + 1] = { spot = spot, d = Dist(spot.centre, at) } end
+    table.sort(ranked, function(a, b) return a.d < b.d end)
+    local out = {}
+    for index = 1, math.min(#ranked, count) do out[index] = ranked[index].spot end
+    return out
+end
+
+-- The cranes that can reach the piece where it stands, nearest first.
+local function Pickers(site, cargo)
+    local pick = PickPoint(cargo)
+    local found = {}
+    for _, crane in ipairs(site.cranes) do
+        if Reaches(crane, pick, pick) then found[#found + 1] = crane end
+    end
+    table.sort(found, function(a, b) return Dist(a:K2_GetActorLocation(), pick) < Dist(b:K2_GetActorLocation(), pick) end)
+    return found
+end
+
+-- A hand-over to a given place: crane B reaches the place, and a spot in the hold is found that crane
+-- A carries the piece to from where it stands and that B reaches as well.
+local function HandOverTo(site, cargo, area, place, holdSpots)
+    local pickers = Pickers(site, cargo)
+    if #pickers == 0 then return nil end
+    local pick = PickPoint(cargo)
+    local _, target = JobPoints({ cargo = cargo, to = area, place = place })
+    if not target then return nil end
+    for _, other in ipairs(site.cranes) do
+        if Reaches(other, target, target) then
+            for _, spot in ipairs(Nearest(holdSpots, other:K2_GetActorLocation(), PLACES_TRIED * 2)) do
+                if FitsAt(site.hold, cargo, spot.place) then
+                    local move = { cargo = cargo, to = site.hold, place = spot.place, settle = true }
+                    local _, across = JobPoints(move)
+                    if across and Reaches(other, across, target) then
+                        for _, crane in ipairs(pickers) do
+                            if not Same(crane, other) and Reaches(crane, pick, across) then return move end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+NeedsStaging = function(site, cargo)
+    local at = site.crane:K2_GetActorLocation()
+    if Dist(cargo:K2_GetActorLocation(), at) > CARGO_REACH_CM then return true end
+    return site.deck and #Pickers(site, cargo) == 0
+end
+
+PlaceInReach = function(site, area, cargo)
+    if not site.deck then return FindPlace(area, cargo) end
+    local fallback = FindPlace(area, cargo)
+    local handOver = nil
+    local ok, found = pcall(function()
+        local spots = FreeSpots(area, cargo)
+        local refused, outOfReach = 0, 0
+        -- The neatest places near either crane first. One that the crane holding the piece cannot
+        -- reach, but the other can, is reached by handing the piece over through the hold.
+        local cranes = {}
+        for _, crane in ipairs(site.cranes) do cranes[#cranes + 1] = crane:K2_GetActorLocation() end
+        local best = {}
+        for _, crane in ipairs(cranes) do
+            for _, spot in ipairs(Neatest(spots, crane, 4)) do best[#best + 1] = spot end
+        end
+        table.sort(best, function(a, b) return math.floor(a.neat * 20) > math.floor(b.neat * 20) end)
+        local guid = CargoGuid(cargo) or "?"
+        local holdSpots = nil
+        for _, spot in ipairs(best) do
+            if FitsAt(area, cargo, spot.place) then
+                if CanReach(site, { cargo = cargo, to = area, place = spot.place }) then return spot.place end
+                if not Relayed[guid] and not Same(area, site.hold) then  -- loads are not passed across the hold
+                    holdSpots = holdSpots or FreeSpots(site.hold, cargo)
+                    local move = HandOverTo(site, cargo, area, spot.place, holdSpots)
+                    if move then
+                        Relayed[guid] = true
+                        Log("handing the " .. ClassName(cargo) .. " over: its place is one only the other crane reaches")
+                        handOver = move
+                        return nil
+                    end
+                end
+            end
+        end
+        -- The neatest spots near a crane that can reach the piece, so that the same crane can carry it
+        -- there; then simply the nearest, in case none of the neat ones can be reached.
+        for _, crane in ipairs(Pickers(site, cargo)) do
+            local tries = Neatest(spots, crane:K2_GetActorLocation(), PLACES_TRIED)
+            for _, spot in ipairs(Nearest(spots, crane:K2_GetActorLocation(), PLACES_TRIED)) do tries[#tries + 1] = spot end
+            for _, spot in ipairs(tries) do
+                if not FitsAt(area, cargo, spot.place) then
+                    refused = refused + 1
+                elseif not CanReach(site, { cargo = cargo, to = area, place = spot.place }) then
+                    outOfReach = outOfReach + 1
+                else
+                    return spot.place
+                end
+            end
+        end
+        Log(string.format("no place in reach in %s: %d free spot(s) on the floor, the game refused %d and %d were out of reach",
+            ClassName(area), #spots, refused, outOfReach))
+        return nil
+    end)
+    if handOver then return nil, handOver end
+    if ok and found then return found end
+    if not ok then Log("looking for a place in reach failed: " .. tostring(found):gsub("\n.*", "")) end
+    return fallback
+end
+
+-- A hand-over: crane A, which reaches the piece, carries it across the hold to a spot crane B also
+-- reaches, from where B can take it on to a dock place only B reaches. The next round then finds the
+-- straight move from there.
+Relay = function(site, cargo, docks)
+    local pickers = Pickers(site, cargo)
+    if #pickers == 0 then return nil end
+    local pick = PickPoint(cargo)
+    for _, other in ipairs(site.cranes) do
+        -- A dock place the other crane can reach.
+        local target = nil
+        for _, dock in ipairs(docks) do
+            if not target then
+                for _, spot in ipairs(Nearest(FreeSpots(dock.area, cargo), other:K2_GetActorLocation(), PLACES_TRIED)) do
+                    if not target and FitsAt(dock.area, cargo, spot.place) then
+                        local _, dropAt = JobPoints({ cargo = cargo, to = dock.area, place = spot.place })
+                        if dropAt and Reaches(other, dropAt, dropAt) then target = dropAt end
+                    end
+                end
+            end
+        end
+        if target then
+            -- A spot in the hold that a picker reaches with the piece and the other crane reaches too.
+            for _, spot in ipairs(Nearest(FreeSpots(site.hold, cargo), other:K2_GetActorLocation(), PLACES_TRIED * 2)) do
+                if FitsAt(site.hold, cargo, spot.place) then
+                    local move = { cargo = cargo, to = site.hold, place = spot.place, settle = true }
+                    local _, across = JobPoints(move)
+                    if across and Reaches(other, across, target) then
+                        for _, crane in ipairs(pickers) do
+                            if not Same(crane, other) and Reaches(crane, pick, across) then
+                                Log("handing the " .. ClassName(cargo) .. " over: one crane brings it across the hold for the other to unload")
+                                return move
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+-- Starts the crane on a move. A crane this mod cannot steer, or a move it cannot work out, is done the
+-- plain way: the piece is lifted where it stands and set down a few seconds later.
+local function StartJob(move)
+    local crane, cargo = move.crane, move.cargo
+    local job = { crane = crane, cargo = cargo, to = move.to, place = move.place, settle = move.settle,
+                  guid = CargoGuid(cargo), phase = move.stage and "stage" or "plain", ticks = 0, model = ModelOf(crane) }
+    if job.model and move.steer and not move.stage then
+        local ok, pick, drop = pcall(JobPoints, move)
+        if ok and pick then
+            job.pick, job.drop = pick, drop
+            job.tip = TravelTip(job.model, pick, drop, crane)
+            job.phase = "clear"
+        end
+        -- How the piece faces now against how its place in its area faces, and so how it must face in
+        -- the world once set down in its new place.
+        pcall(function()
+            local from = cargo.CargoArea
+            local footing = Footing(from, cargo)
+            local fromYaw = from.OriginComponent:K2_GetComponentRotation().Yaw + footing.yaw
+            local toYaw = move.to.OriginComponent:K2_GetComponentRotation().Yaw + move.place.rotation.Yaw
+            job.finalYaw = Turn(cargo:K2_GetActorRotation().Yaw - fromYaw + toYaw)
+        end)
+    end
     Job = job
 end
 
 local function Goto(job, goal)
-    Steer = { crane = job.crane, goal = goal }
+    Steer = { crane = job.crane, model = job.model, goal = goal }
     job.ticks = 0
 end
 
+local function WithDrum(pose, drum)
+    local goal = { drum = drum }
+    for part, value in pairs(pose) do goal[part] = value end
+    return goal
+end
+
+-- Where the hook hangs now.
+local function HookNow(crane)
+    local ok, at = pcall(function() return crane.HookJoint:K2_GetComponentLocation() end)
+    if ok and at then return at end
+    return crane:K2_GetActorLocation()
+end
+
+-- The steps that take a crane to a pose. A crane with a travelling height that has to swing far first
+-- lifts its arm to that height where it is, then swings at that height straight to the new pose.
+local function SwingRoute(crane, model, target, tipZ)
+    if not model.travelUp or target.swivel == nil then return { target } end
+    local now = crane[model.joints.swivel]:GetCurrentValue()
+    if math.abs(target.swivel - now) < 20 then return { target } end
+    local up = model.Arm(crane, HookNow(crane), tipZ)
+    if not up then return { target } end
+    return { WithDrum(up.pose, DRUM_MIN), target }
+end
+
+-- The next goal for putting a crane back as it was found, by the same way round: up where it is,
+-- across at height to over its resting place, then down into it.
+local function ParkGoal(crane, model)
+    if not model.travelUp then return model.parked end
+    local now = crane[model.joints.swivel]:GetCurrentValue()
+    if math.abs(now - model.parked.swivel) <= 20 then return model.parked end
+    local base, yaw = crane:K2_GetActorLocation(), math.rad(crane:K2_GetActorRotation().Yaw)
+    local high = base.Z + model.travelUp
+    local hook = HookNow(crane)
+    if hook.Z < high - model.hookBelow - DRUM_MIN - 40 then
+        local up = model.Arm(crane, hook, high)
+        if up then return WithDrum(up.pose, DRUM_MIN) end
+        return model.parked
+    end
+    -- Over the resting place: straight ahead of the crane, where the hook hangs when parked.
+    local rest = { X = base.X + 553 * math.cos(yaw) - 47 * math.sin(yaw), Y = base.Y + 553 * math.sin(yaw) + 47 * math.cos(yaw), Z = base.Z }
+    local across = model.Arm(crane, rest, high)
+    if across then return WithDrum(across.pose, DRUM_MIN) end
+    return model.parked
+end
+
+local function GoRoute(job, goals)
+    job.route = goals
+    Goto(job, table.remove(job.route, 1))
+end
+
 local function SetDown(job)
-    if Valid(job.crane) and Valid(job.cargo) and Same(job.crane.AttachedCargo, job.cargo) then
+    if not Valid(job.crane) or not Valid(job.cargo) then return end
+    local arrived = false
+    if Same(job.crane.AttachedCargo, job.cargo) then
         job.crane:ServerDetachCargo(job.to, job.place.position, job.place.rotation)
-        if not job.settle then
-            Moved = Moved + 1
-            if job.guid then Manual[job.guid] = nil end  -- done; without this it would be carried straight back
+        arrived = true
+    elseif Same(job.cargo.CargoArea, job.to) then
+        -- It came off the hook on the way but ended up where it was going: that counts.
+        Log("the " .. ClassName(job.cargo) .. " came off the hook on the way but landed where it was going")
+        arrived = true
+    else
+        Log("the " .. ClassName(job.cargo) .. " came off the hook on the way and is not where it was going")
+    end
+    -- A hand-marked piece that has got to the side it was marked for is done, however it got there.
+    if arrived and job.guid and Manual[job.guid] then
+        local inHold = IsHold(job.to)
+        if (Manual[job.guid] == "load") == inHold then
+            Manual[job.guid] = nil
+            if job.settle then Moved = Moved + 1 end
+        end
+    end
+    if arrived and not job.settle then
+        Moved = Moved + 1
+        if job.guid then
+            Manual[job.guid] = nil  -- done; without this it would be carried straight back
+            Relayed[job.guid] = nil
         end
     end
 end
@@ -1016,8 +1986,57 @@ local function JobStep()
     job.ticks = job.ticks + 1
     local seconds = job.ticks * MOTION_MS / 1000
     local arrived = Steer == nil or seconds > PHASE_SECONDS
+    local carrying = job.phase == "to drop" or job.phase == "lower to drop" or job.phase == "set down"
+        or job.phase == "turn" or job.phase == "settle in"
+        or (job.phase == "lift" and seconds >= 0.8 and job.lifted)
+    if carrying and not Same(job.crane.AttachedCargo, job.cargo) then
+        -- Loads come off this hook now and then, for the game's own operators too. While it is still
+        -- hanging by the hook it is latched again, a few times at most.
+        local near = false
+        pcall(function()
+            near = Dist(job.crane.HookJoint:K2_GetComponentLocation(), job.cargo.CargoHook:K2_GetComponentLocation()) < 300
+                and math.abs(job.crane.HookJoint:K2_GetComponentLocation().Z - job.cargo.CargoHook:K2_GetComponentLocation().Z) < 300
+        end)
+        if near and not Same(job.cargo.CargoArea, job.to) and (job.relatched or 0) < 3 then
+            job.relatched = (job.relatched or 0) + 1
+            job.crane:ServerAttachCargo(job.cargo)
+            Log("the " .. ClassName(job.cargo) .. " came off the hook on the way and was latched again")
+            return
+        end
+        -- Otherwise where it landed decides: in its new place it counts as moved, anywhere else it is
+        -- fetched again.
+        Steer, job.route = nil, nil
+        if Same(job.cargo.CargoArea, job.to) and not job.settle then
+            Log("the " .. ClassName(job.cargo) .. " came off the hook on the way but landed where it was going")
+            Moved = Moved + 1
+            if job.guid then Manual[job.guid] = nil end
+        else
+            Log("the " .. ClassName(job.cargo) .. " came off the hook on the way; it will be fetched again")
+        end
+        Goto(job, { drum = DRUM_MIN })
+        job.phase = "done"
+        return
+    end
+    if job.route and #job.route > 0 then  -- part way along a route: on to its next step
+        if arrived then Goto(job, table.remove(job.route, 1)) end
+        return
+    end
 
-    if job.phase == "plain" then
+    if job.phase == "stage" then
+        if job.ticks == 1 then
+            pcall(function() job.cargo:SetActorHiddenInGame(true) end)
+            job.crane:ServerAttachCargo(job.cargo)
+        elseif job.ticks >= 3 then
+            SetDown(job)
+            pcall(function() job.cargo:SetActorHiddenInGame(false) end)
+            ClearGhost(job.to)
+            local name = "cargo"
+            pcall(function() name = job.cargo:GetRepresentedInventoryItem():GetDisplayName():ToString() end)
+            Toast("Moving " .. name .. " to the nearest dock")
+            Job, Rest = nil, 1
+        end
+        return
+    elseif job.phase == "plain" then
         if job.ticks == 1 then job.crane:ServerAttachCargo(job.cargo) end
         if seconds >= 4 then
             SetDown(job)
@@ -1027,28 +2046,147 @@ local function JobStep()
         Goto(job, { drum = DRUM_MIN })
         job.phase = "to pick"
     elseif job.phase == "to pick" and arrived then
-        local pose = Reach(job.crane, job.pick)
-        pose.drum = DRUM_MIN
-        Goto(job, pose)
+        job.arm = job.model.Arm(job.crane, job.pick, job.tip)
+        if not job.arm then
+            Log("the crane cannot reach the pick-up after all; moving the piece the plain way")
+            job.phase, job.ticks = "plain", 0
+            return
+        end
+        GoRoute(job, SwingRoute(job.crane, job.model, WithDrum(job.arm.pose, DRUM_MIN), job.tip))
         job.phase = "lower to pick"
     elseif job.phase == "lower to pick" and arrived then
-        Goto(job, HookAt(job.crane, job.pick))
-        job.phase = "attach"
+        if job.model.feel then
+            -- Let the hook down by watching it, not by the model: it has to end up on the piece's
+            -- lifting point, which the model alone does not get close enough to.
+            job.phase, job.ticks, job.lastHook, job.still = "descend", 0, nil, 0
+            Steer = nil
+        else
+            Goto(job, WithDrum(job.arm.pose, DrumFor(job.model, job.arm.tipZ, job.pick.Z)))
+            job.phase = "attach"
+        end
+    elseif job.phase == "descend" then
+        if job.ticks % 3 ~= 0 then return end
+        local hook = job.crane.HookJoint:K2_GetComponentLocation()
+        local lift = job.cargo.CargoHook:K2_GetComponentLocation()
+        local want = lift.Z + HOOK_ON_LIFT_CM + 10 * (job.tries or 0)  -- a little higher on each new try
+        local moved = job.lastHook and math.abs(job.lastHook - hook.Z) or 99
+        job.lastHook = hook.Z
+        job.still = moved < 1.5 and job.still + 1 or 0
+        if hook.Z <= want + 3 or job.still >= 4 or seconds > PHASE_SECONDS then
+            -- On it, or resting on something and going no lower.
+            Steer = nil
+            job.phase, job.ticks = "attach", 0
+            job.hookGap = hook.Z - lift.Z
+            return
+        end
+        local drum = job.crane[job.model.joints.drum]:GetCurrentValue()
+        local goal = WithDrum(job.arm.pose, Clamp(drum + math.min(hook.Z - want, 60), DRUM_MIN, DRUM_MAX))
+        Steer = { crane = job.crane, model = job.model, goal = goal }
     elseif job.phase == "attach" and arrived then
         job.crane:ServerAttachCargo(job.cargo)
+        job.heldAtOnce = Same(job.crane.AttachedCargo, job.cargo)
+        -- Lift at once, before the game decides the piece is still in its place and sets it down.
+        if job.model.feel then Goto(job, { drum = DRUM_MIN }) end
         job.ticks = 0
         job.phase = "lift"
     elseif job.phase == "lift" and seconds >= 0.8 then
+        if not Same(job.crane.AttachedCargo, job.cargo) then
+            -- The piece did not stay on the hook. Say where the hook was against where it should be,
+            -- and try again from a little higher, or give the piece up.
+            job.tries = (job.tries or 0) + 1
+            local hookAt, liftAt = "?", "?"
+            pcall(function()
+                local h = job.crane.HookJoint:K2_GetComponentLocation()
+                hookAt = string.format("%.0f %.0f %.0f", h.X, h.Y, h.Z)
+            end)
+            pcall(function()
+                local c = job.cargo.CargoHook:K2_GetComponentLocation()
+                liftAt = string.format("%.0f %.0f %.0f", c.X, c.Y, c.Z)
+            end)
+            Log(string.format("the %s did not stay on the hook (try %d): hook at %s, its lifting point at %s, gap %s cm, on the hook straight after attaching: %s",
+                ClassName(job.cargo), job.tries, hookAt, liftAt, job.hookGap and string.format("%.0f", job.hookGap) or "?",
+                tostring(job.heldAtOnce)))
+            if job.tries < 3 then
+                job.pick.Z = job.pick.Z - 15
+                if job.model.feel then
+                    job.phase, job.ticks, job.lastHook, job.still = "descend", 0, nil, 0
+                else
+                    Goto(job, WithDrum(job.arm.pose, DrumFor(job.model, job.arm.tipZ, job.pick.Z)))
+                    job.phase = "attach"
+                end
+                return
+            end
+            Failed[job.guid or "?"] = (Failed[job.guid or "?"] or 0) + 1
+            if (Failed[job.guid or "?"] or 0) >= 2 and job.guid then
+                Manual[job.guid] = nil
+                Toast("Crane operator could not lift a " .. ClassName(job.cargo):gsub("^BP_", ""):gsub("_C$", ""))
+            end
+            Goto(job, { drum = DRUM_MIN })
+            job.phase = "done"
+            return
+        end
+        job.lifted = true
         Goto(job, { drum = DRUM_MIN })
         job.phase = "to drop"
     elseif job.phase == "to drop" and arrived then
-        local pose = Reach(job.crane, job.drop)
-        pose.drum = DRUM_MIN
-        Goto(job, pose)
+        job.arm = job.model.Arm(job.crane, job.drop, job.tip)
+        if not job.arm then  -- out of reach after all: carry on the plain way
+            SetDown(job)
+            Job, Rest = nil, math.floor(4000 / TICK_MS)
+            return
+        end
+        GoRoute(job, SwingRoute(job.crane, job.model, WithDrum(job.arm.pose, DRUM_MIN), job.tip))
         job.phase = "lower to drop"
     elseif job.phase == "lower to drop" and arrived then
-        Goto(job, HookAt(job.crane, job.drop))
-        job.phase = "set down"
+        if job.finalYaw and job.model.joints.turn then
+            job.phase, job.ticks, job.turnSign, job.lastError = "turn", 0, 1, nil
+            Steer = nil
+        elseif job.model.feel then
+            job.phase, job.ticks, job.lastLoad, job.still = "settle in", 0, nil, 0
+            Steer = nil
+        else
+            Goto(job, WithDrum(job.arm.pose, DrumFor(job.model, job.arm.tipZ, job.drop.Z)))
+            job.phase = "set down"
+        end
+    elseif job.phase == "settle in" then
+        -- Lets the load down by watching it, until its lifting point is where it will be once the
+        -- load stands in its place, or the load rests on something and goes no lower.
+        if job.ticks % 3 ~= 0 then return end
+        local load = job.cargo.CargoHook:K2_GetComponentLocation()
+        local want = job.drop.Z + 5
+        local moved = job.lastLoad and math.abs(job.lastLoad - load.Z) or 99
+        job.lastLoad = load.Z
+        job.still = moved < 1.5 and job.still + 1 or 0
+        if load.Z <= want or job.still >= 4 or seconds > PHASE_SECONDS then
+            Steer = nil
+            job.phase, job.ticks = "set down", 0
+            return
+        end
+        local drum = job.crane[job.model.joints.drum]:GetCurrentValue()
+        local goal = WithDrum(job.arm.pose, Clamp(drum + math.min(load.Z - want, 60), DRUM_MIN, DRUM_MAX))
+        Steer = { crane = job.crane, model = job.model, goal = goal }
+    elseif job.phase == "turn" then
+        -- Turns the hook until the load faces the way its new place does. Which way the hook's turn
+        -- moves the load is found by trying: if a step makes it worse, the next goes the other way.
+        if job.ticks % 4 ~= 0 then return end
+        local error = Turn(job.finalYaw - job.cargo:K2_GetActorRotation().Yaw)
+        if math.abs(error) <= 3 or seconds > 10 then
+            if job.model.feel then
+                job.phase, job.ticks, job.lastLoad, job.still = "settle in", 0, nil, 0
+                Steer = nil
+            else
+                Goto(job, WithDrum(job.arm.pose, DrumFor(job.model, job.arm.tipZ, job.drop.Z)))
+                job.phase = "set down"
+            end
+            return
+        end
+        if job.lastError and math.abs(error) > math.abs(job.lastError) + 1 then job.turnSign = -job.turnSign end
+        job.lastError = error
+        local joint = job.crane[job.model.joints.turn]
+        local goal = joint:GetCurrentValue() + job.turnSign * error
+        if goal > 179 then goal = goal - 360 elseif goal < -179 then goal = goal + 360 end  -- the same way round, from the other side
+        goal = Clamp(goal, -179, 179)
+        Steer = { crane = job.crane, model = job.model, goal = { turn = goal } }
     elseif job.phase == "set down" and arrived then
         SetDown(job)
         job.ticks = 0
@@ -1090,36 +2228,80 @@ local function Work()
             end)
         end
     end
-    -- Someone else in the seat (you, usually) means the crane is taken; the operator in it does not.
-    local driver = site and CraneDriver(site.crane) or nil
-    local taken = driver ~= nil and not Same(driver, character)
-    if AtCrane and (not site or taken or not Same(AtCrane.crane, site.crane) or not Same(AtCrane.character, character)) then
+    -- Someone else in a crane's seat (you, usually) means that crane is taken; the operator does not.
+    local free = {}
+    for _, crane in ipairs(site and site.cranes or {}) do
+        local driver = CraneDriver(crane)
+        if not driver or Same(driver, character) then free[#free + 1] = crane end
+    end
+    local inSite = false
+    for _, crane in ipairs(free) do
+        if AtCrane and Same(AtCrane.crane, crane) then inSite = true end
+    end
+    if AtCrane and (not site or not inSite or not Same(AtCrane.character, character)) then
         LeaveCrane()  -- the boat has left, the operator was changed, or the crane is no longer theirs
     end
     if site and not AtCrane then pcall(NoteSpot, operator, character, site.boat) end
+    if site and AtCrane then site.crane = AtCrane.crane end
+    if not site then Unreachable = {} end
     local move, complaint = nil, nil
-    if site and not taken and site.crane:IsPowered() then
-        local held = site.crane.AttachedCargo
-        if Valid(held) then
-            -- A piece the crane would not set down where it was sent: put it wherever its area has room.
-            local back = Valid(held.CargoArea) and held.CargoArea or site.hold
-            local place = FindPlace(back, held)
-            if place then
-                Log("a piece was left on the hook, setting it down where there is room")
-                site.crane:ServerDetachCargo(back, place.position, place.rotation)
+    if site and #free > 0 then
+        for _, crane in ipairs(free) do
+            local held = crane.AttachedCargo
+            if Valid(held) then
+                -- A piece a crane would not set down where it was sent: put it wherever its area has room.
+                local back = Valid(held.CargoArea) and held.CargoArea or site.hold
+                local place = FindPlace(back, held)
+                if place then
+                    Log("a piece was left on the hook, setting it down where there is room")
+                    crane:ServerDetachCargo(back, place.position, place.rotation)
+                end
+                return
             end
-            return
         end
         move = NextSettle(site)
         if not move then
             local load, unload, count = ReadMarks()
-            for guid in pairs(Manual) do  -- which way a hand-marked piece goes depends on where it is
-                load[guid], unload[guid], count = true, true, count + 1
+            for guid, way in pairs(Manual) do  -- the way a hand-marked piece goes was fixed when it was marked
+                if way == "unload" then unload[guid] = true else load[guid] = true end
+                count = count + 1
             end
             if count > 0 then move, complaint = NextMove(site, load, unload) end
         end
     end
+    if move then
+        if move.stage then
+            move.crane, move.steer = site.crane, false
+        else
+            move.crane, move.steer = ChooseCrane(site, move, character)
+        end
+        if not move.crane then move = nil end
+        if move and site.deck and not move.steer and not move.stage then
+            -- Neither of the boat's own cranes reaches it. It is left where it is rather than pulled
+            -- across to the hook, and the next piece is looked at straight away.
+            local guid = CargoGuid(move.cargo) or "?"
+            Unreachable[guid] = true
+            local name = "piece"
+            pcall(function() name = move.cargo:GetRepresentedInventoryItem():GetDisplayName():ToString() end)
+            Toast("The " .. name .. " is out of reach of the ship's cranes")
+            move = nil
+            Rest = 1
+            return
+        end
+    end
+    if move and AtCrane and not Same(AtCrane.crane, move.crane) then
+        -- The other crane suits this piece: put this one back and change seats.
+        local model = ModelOf(AtCrane.crane)
+        if model and not There(AtCrane.crane, model, model.parked) and ParkTries < 30 then
+            ParkTries = ParkTries + 1
+            Steer = { crane = AtCrane.crane, model = model, goal = ParkGoal(AtCrane.crane, model) }
+            Rest = math.floor(1000 / TICK_MS)
+            return
+        end
+        LeaveCrane()
+    end
     if move and not AtCrane and Valid(character) then
+        site.crane = move.crane
         EnterCrane(site, character, operator)
         Rest = math.floor(SEAT_SECONDS * 1000 / TICK_MS)
         return
@@ -1127,9 +2309,10 @@ local function Work()
     if not move and AtCrane then
         -- Put the crane back as it was found before getting out of the seat.
         local crane = AtCrane.crane
-        if Valid(crane) and CanSteer(crane) and not There(crane, PARKED) and ParkTries < 15 then
+        local model = Valid(crane) and ModelOf(crane) or nil
+        if model and not There(crane, model, model.parked) and ParkTries < 30 then
             ParkTries = ParkTries + 1
-            Steer = { crane = crane, goal = PARKED }
+            Steer = { crane = crane, model = model, goal = ParkGoal(crane, model) }
             Rest = math.floor(1000 / TICK_MS)
             return
         end
@@ -1142,8 +2325,14 @@ local function Work()
             Moved = 0
             Toast(operator .. " has started working the crane")
         end
+        if move.tidy then
+            if not TidyTold then
+                TidyTold = true
+                Toast(operator .. " is making room in the hold")
+            end
+        end
         Complaint = nil
-        StartJob(site, move)  -- reads the piece's ID before any lift: a piece on the hook no longer answers
+        StartJob(move)  -- reads the piece's ID before any lift: a piece on the hook no longer answers
         return
     end
     if complaint and complaint ~= Complaint then
@@ -1235,7 +2424,8 @@ local function ToggleMark()
         Manual[guid] = nil
         Toast("Mark removed from " .. ItemName(cargo))
     else
-        Manual[guid] = true
+        Manual[guid] = IsHold(area) and "unload" or "load"  -- kept, even while the piece is passed across the hold
+        Unreachable[guid] = nil        Complaint = nil  -- if the operator is stuck, have them say why again
         Toast(string.format("%s marked to go to the %s", ItemName(cargo), IsHold(area) and "dock" or "boat"))
     end
 end
@@ -1299,7 +2489,7 @@ local function UpdateMarkers()
             if guid and Manual[guid] then
                 local area = nil
                 pcall(function() area = cargo.CargoArea end)
-                if Valid(area) then wanted[guid] = { cargo = cargo, title = IsHold(area) and TO_DOCK or TO_BOAT } end
+                if Valid(area) then wanted[guid] = { cargo = cargo, title = Manual[guid] == "unload" and TO_DOCK or TO_BOAT } end
             end
         end
     end
@@ -1380,6 +2570,7 @@ LoopInGameThreadWithDelay(TICK_MS, function()
 end)
 
 LoopInGameThreadWithDelay(MOTION_MS, function()
+    pcall(SteadyStep)
     local ok, err = pcall(JobStep)
     if not ok then
         Job, Steer = nil, nil
