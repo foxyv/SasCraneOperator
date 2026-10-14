@@ -1510,12 +1510,18 @@ end
 
 local Steer = nil  -- { crane, model, goal }: where the joints are being taken
 
-local function There(crane, model, goal)
+-- Is the crane at the goal? With `loose`, near enough to go straight on to the next step of a route:
+-- the joints ease in slowly over their last stretch, and waiting for that at every step of a route is
+-- what made the crane move, stop, move.
+PASS_LOOSENESS = 8
+
+local function There(crane, model, goal, loose)
+    local factor = loose and PASS_LOOSENESS or 1
     for part, name in pairs(model.joints) do
         if goal[part] ~= nil then
             local off = goal[part] - crane[name]:GetCurrentValue()
             if part == "swivel" and model.wraps then off = Turn(off) end
-            if math.abs(off) > model.close[part] then return false end
+            if math.abs(off) > model.close[part] * factor then return false end
         end
     end
     return true
@@ -1542,7 +1548,7 @@ local function SteerStep()
             joint:SetTargetValue(to)
         end
     end
-    if There(s.crane, s.model, s.goal) then Steer = nil end
+    if There(s.crane, s.model, s.goal, s.pass) then Steer = nil end
 end
 
 -- The cell a piece stands on in its area and how many cells it covers each way.
@@ -2116,8 +2122,8 @@ local function StartJob(move)
     Job = job
 end
 
-local function Goto(job, goal)
-    Steer = { crane = job.crane, model = job.model, goal = goal }
+local function Goto(job, goal, pass)
+    Steer = { crane = job.crane, model = job.model, goal = goal, pass = pass }
     job.ticks = 0
 end
 
@@ -2204,7 +2210,7 @@ end
 
 local function GoRoute(job, goals)
     job.route = goals
-    Goto(job, table.remove(job.route, 1))
+    Goto(job, table.remove(job.route, 1), #job.route > 0)
 end
 
 -- While a load is on the hook its collision box is drawn in a little on every side, so that it does
@@ -2420,11 +2426,17 @@ local function JobStep()
         end
     end
     if job.route and #job.route > 0 then  -- part way along a route: on to its next step
-        if arrived then Goto(job, table.remove(job.route, 1)) end
+        if arrived then
+            local goal = table.remove(job.route, 1)
+            Goto(job, goal, #job.route > 0)  -- passed through on the way, unless it is the last
+        end
         return
     end
 
-    if job.phase == "stage" then
+    if job.phase == "park" then
+        if arrived then Job = nil end  -- the route above has been driven to its end
+        return
+    elseif job.phase == "stage" then
         if job.ticks == 1 then
             pcall(function() job.cargo:SetActorHiddenInGame(true) end)
             job.crane:ServerAttachCargo(job.cargo)
@@ -2663,6 +2675,26 @@ local ParkTries = 0
 
 local Pending = nil  -- { move, cargo, crane, at }: chosen, not yet started
 
+-- Puts a crane back as it was found in one go: the route up, drawn in, round and down into its
+-- resting pose is worked out once and driven as a job, not a step re-planned every second.
+local function StartPark(crane, model)
+    local route = { model.parked }
+    if model.travelUp then
+        local base, yaw = crane:K2_GetActorLocation(), math.rad(crane:K2_GetActorRotation().Yaw)
+        local rest = { X = base.X + 553 * math.cos(yaw) - 47 * math.sin(yaw), Y = base.Y + 553 * math.sin(yaw) + 47 * math.cos(yaw), Z = base.Z }
+        local high = math.max(base.Z + model.travelUp, HookNow(crane).Z + model.hookBelow + DRUM_MIN)
+        local over = model.Arm(crane, rest, high)
+        if over then
+            route = SwingRoute(crane, model, WithDrum(over.pose, DRUM_MIN), high, rest)
+            route[#route + 1] = model.parked
+        end
+    end
+    local first = table.remove(route, 1)
+    Job = { phase = "park", crane = crane, cargo = crane, model = model, ticks = 0, route = route }
+    Steer = { crane = crane, model = model, goal = first, pass = #route > 0 }
+    Log(string.format("putting the crane back: %d step(s)", #route + 1))
+end
+
 local function Work()
     if not Job and (next(Slimmed) or next(Passing)) then pcall(Unslim) end
     if not StrandedChecked then
@@ -2793,10 +2825,9 @@ local function Work()
     if move and AtCrane and not Same(AtCrane.crane, move.crane) then
         -- The other crane suits this piece: put this one back and change seats.
         local model = ModelOf(AtCrane.crane)
-        if model and not There(AtCrane.crane, model, model.parked) and ParkTries < 30 then
+        if model and not There(AtCrane.crane, model, model.parked) and ParkTries < 2 then
             ParkTries = ParkTries + 1
-            Steer = { crane = AtCrane.crane, model = model, goal = ParkGoal(AtCrane.crane, model) }
-            Rest = math.floor(1000 / TICK_MS)
+            StartPark(AtCrane.crane, model)
             return
         end
         LeaveCrane()
@@ -2811,10 +2842,9 @@ local function Work()
         -- Put the crane back as it was found before getting out of the seat.
         local crane = AtCrane.crane
         local model = Valid(crane) and ModelOf(crane) or nil
-        if model and not There(crane, model, model.parked) and ParkTries < 30 then
+        if model and not There(crane, model, model.parked) and ParkTries < 2 then
             ParkTries = ParkTries + 1
-            Steer = { crane = crane, model = model, goal = ParkGoal(crane, model) }
-            Rest = math.floor(1000 / TICK_MS)
+            StartPark(crane, model)
             return
         end
         LeaveCrane()
