@@ -17,7 +17,8 @@ Cargo gets marked in two ways:
 
 - **By the planner.** If you use [Ships At Sea Logistics](https://github.com/foxyv/ShipsAtSeaLogistics),
   the operator works through its list for the port you are in: what the route unloads here, and what
-  it loads. Take loads out of the warehouse yourself as usual.
+  it loads. Take loads out of the warehouse yourself as usual. Untick "Send orders to the crane
+  operator" in the planner and the operator moves only what you mark by hand.
 - **By hand.** Look at a piece of crane cargo and press **F5**. A piece on the dock is marked to go
   to the boat, a piece in the hold to go to the dock. It gets a floating TO BOAT or TO DOCK marker,
   like the game's markers for a tracked mission. F5 again takes the mark off. While an operator is
@@ -107,6 +108,8 @@ To take them off duty, drag them back to Resting or into another position.
 
 - **F5** marks or unmarks the piece of crane cargo in the middle of your view, on foot or from a
   crane's camera, up to 80 m away.
+- **Shift+F5** switches off the hint over the piece you are looking at, or back on. It stays the
+  way you leave it after a restart.
 - **Ctrl+Alt+O** puts the first resting crew member of the boat you are next to on crane duty, or
   takes the operator off. It does the same as dragging in the crew chart.
 - **Ctrl+Alt+H** sets where the operator waits on the boat when not at the crane: stand on the boat

@@ -24,7 +24,7 @@
 local ScriptDir = debug.getinfo(1, "S").source:sub(2):match("^(.*)[/\\][^/\\]*$") or "."
 local OperatorsPath = ScriptDir .. "\\..\\operators.txt"
 local SpotsPath = ScriptDir .. "\\..\\spots.txt"
-local MarksPath = ScriptDir .. "\\..\\..\\SasLogistics\\highlight.txt"
+local MarksPath = ScriptDir .. "\\..\\..\\SasLogistics\\crane_orders.txt"  -- written by the planner while "Send orders to the crane operator" is on
 
 CATEGORY = "/Game/ShipsAtSea/Crew/CrewTaskCategories/DA_CrewTaskCategory_Engineering.DA_CrewTaskCategory_Engineering"
 GROUP_NAME = "Crane Operator"
@@ -1067,7 +1067,7 @@ local function ClearAbove(site, cargo)
     end
     if not place then return nil end
     Log("moving a " .. ClassName(actor) .. " off the " .. ClassName(cargo) .. " it stands on")
-    return { cargo = actor, to = area, place = place, settle = true, tidy = true }
+    return { cargo = actor, to = area, place = place, settle = true, tidy = true, under = cargo }
 end
 
 PLACES_TRIED = 16  -- free spots tried, nearest a crane first, when looking for a place in reach
@@ -1610,10 +1610,15 @@ end
 -- The crane to do a move. A dock crane is the only one there is; of a boat's own cranes, the one that
 -- can reach both places, preferring the one the operator is already sitting in and then the nearer.
 -- The second answer is false when no crane can be steered there and the piece is moved the plain way.
+function CraneName(crane)  -- the crane's object name, which tells a ship's cranes apart in the log
+    local ok, name = pcall(function() return crane:GetFName():ToString() end)
+    return ok and name or "a crane"
+end
 local function ChooseCrane(site, move, character)
     if not site.deck then return site.crane, ModelOf(site.crane) ~= nil end
     local ok, pick, drop = pcall(JobPoints, move)
     local best, bestScore, nearest, nearestDist = nil, math.huge, nil, math.huge
+    local notes = {}
     for _, crane in ipairs(site.cranes) do
         local driver = CraneDriver(crane)
         if (not driver or Same(driver, character)) and crane:IsPowered() then
@@ -1627,6 +1632,9 @@ local function ChooseCrane(site, move, character)
                     if model.Arm(crane, pick, tip) and model.Arm(crane, drop, tip) then
                         local score = d - ((AtCrane and Same(AtCrane.crane, crane)) and 500 or 0)
                         if score < bestScore then best, bestScore = crane, score end
+                        notes[#notes + 1] = string.format("%s reaches it (%.0f m to go, score %.0f)", CraneName(crane), d / 100, score / 100)
+                    else
+                        notes[#notes + 1] = CraneName(crane) .. " cannot reach both places"
                     end
                 end
             elseif not nearest then
@@ -1634,7 +1642,12 @@ local function ChooseCrane(site, move, character)
             end
         end
     end
-    if best then return best, true end
+    if best then
+        if AtCrane and not Same(AtCrane.crane, best) then
+            Log("choosing " .. CraneName(best) .. " for the " .. ClassName(move.cargo) .. ": " .. table.concat(notes, "; "))
+        end
+        return best, true
+    end
     if not ok or not pick then
         Log("no crane can be steered for this move: its places could not be worked out (" .. tostring(pick):gsub("\n.*", "") .. ")")
     else
@@ -2804,6 +2817,7 @@ local function Work()
         Skip = {}
         for _ = 1, 6 do
             Skip[CargoGuid(move.cargo) or "?"] = true
+            if move.under then Skip[CargoGuid(move.under) or "?"] = true end  -- a piece cleared off another passes over both
             local other = NextMove(site, load, unload)
             if not other then break end
             other.crane, other.steer = ChooseCrane(site, other, character)
@@ -3048,8 +3062,12 @@ end
 -- The hint. While a crane operator is on duty nearby, the piece you are looking at carries a small
 -- marker of its own saying what F5 will do with it: mark it, or take its mark off. It is the piece
 -- F5 acts on, so with stacked pieces you can see which one that is before pressing.
+-- Shift+F5 switches the hint off and on; switched off, it stays off after a restart.
 HINT_RANGE_CM = 3000
 local Hint = nil  -- { cargo, title, actor }
+HintOffPath = ScriptDir .. "\\..\\hint_off.txt"
+HintOff = io.open(HintOffPath, "r") ~= nil
+HintToggleWanted = false
 
 local function OperatorNearby(here)
     for _, comp in ipairs(Live("SasBoatCrewComponent")) do
@@ -3069,7 +3087,7 @@ end
 
 local function UpdateHint()
     local here = FindFirstOf("PlayerController").PlayerCameraManager:GetCameraLocation()
-    local cargo = OperatorNearby(here) and LookedAtCargo() or nil
+    local cargo = not HintOff and OperatorNearby(here) and LookedAtCargo() or nil
     if cargo and Dist(cargo:K2_GetActorLocation(), here) > HINT_RANGE_CM then cargo = nil end
     if not cargo then
         DropHint()
@@ -3089,6 +3107,9 @@ end
 local MarkWanted = false
 RegisterKeyBind(Key.F5, function()
     MarkWanted = true
+end)
+RegisterKeyBind(Key.F5, { ModifierKey.SHIFT }, function()
+    HintToggleWanted = true
 end)
 
 local SpotWanted = false
@@ -3124,6 +3145,18 @@ LoopInGameThreadWithDelay(TICK_MS, function()
         if not ok then Log("marking failed: " .. tostring(err):gsub("\n.*", "")) end
         DropHint()
         pcall(UpdateMarkers)
+    end
+    if HintToggleWanted then
+        HintToggleWanted = false
+        HintOff = not HintOff
+        if HintOff then
+            local file = io.open(HintOffPath, "w")
+            if file then file:close() end
+        else
+            os.remove(HintOffPath)
+        end
+        Toast(HintOff and "Cargo hint off (Shift+F5 turns it back on)" or "Cargo hint on")
+        Log("the F5 hint is now " .. (HintOff and "off" or "on"))
     end
     if SpotWanted then
         SpotWanted = false
