@@ -28,14 +28,17 @@ Cargo gets marked in two ways:
 
 While there is work the operator sits in the crane's seat and the crane moves. The boom goes over the
 piece, the hook comes down and latches it, it is lifted straight up off its stack, carried across,
-turned to face the way its new place does, lined up squarely over it, and lowered into it. On the
+turned the shorter way to face the way its new place does, lined up squarely over it, and lowered
+into it. While a load is lifted out from among other cargo and lowered in between it, it does not
+collide with it, so it does not snag. On the
 deck cranes the boom is drawn in before every swing and run out again after it, so it clears the
 ship's superstructure, and the load is carried high enough to clear everything under its way. A piece takes about half a minute. When the work is done the
 crane is put back as it was found and the operator goes back to their place on the boat.
 
 Along the way the operator:
 
-- **unloads before loading**, and takes pieces from the top of a stack first;
+- **unloads before loading**, does everything the cranes can reach before moving cargo around the
+  dock, and takes pieces from the top of a stack first;
 - **moves aside anything standing on a marked piece** before lifting it, and lets down any piece
   left with nothing under it;
 - **sets pieces down neatly**: squarely on top of a piece of the same size, or else in the spot on
@@ -43,11 +46,13 @@ Along the way the operator:
   the far side in so nothing already set down is in the way;
 - **puts each piece only where it belongs**: medium and large cargo go to their own dock areas;
 - **brings a piece the warehouse put out somewhere no crane reaches** to the dock area by the boat
-  first, with a toast;
+  first, with a toast, once per piece and only to a spot a crane can then pick it up from. Anything
+  standing on it is moved aside first, and any piece left hanging in the air anywhere nearby is let
+  down;
 - **on the class 3 ship, picks the crane** that can reach both where a piece is and where it is
-  going, changing seats when the other crane suits it better. When neither can do the whole move,
-  one brings it across the hold for the other to finish (a hand-over). A piece neither crane can get
-  to is left alone, with a toast saying it is out of reach.
+  going. It finishes what the crane it sits in can do before changing seats. When neither can do the
+  whole move, one brings it across the hold for the other to finish (a hand-over). A piece neither
+  crane can get to, or cannot lift clear of the cargo around it, is left alone with a toast.
 
 Unloaded cargo counts as delivered. A toast says when the operator starts and finishes, and when they
 have to stop because the hold or the dock is full.
@@ -127,9 +132,14 @@ To take them off duty, drag them back to Resting or into another position.
 ## Limits
 
 - The crane does not plan a way around things, only over them. Before each move it traces straight
-  down along the load's way to find the highest thing under it and carries the load a metre above
-  that, if the arm reaches so high. If the crane is caught on something anyway, it lifts a metre and
-  carries on, a few times at most.
+  down along the load's way, and round the arc its arm sweeps, to find the highest thing under them,
+  and carries the load a metre above that (at least 20 cm when the arm cannot reach higher; otherwise
+  the piece is left alone). The arm is drawn in, swung and run out in short steps at that height. If
+  the crane is caught on something anyway, it lifts a metre and carries on, a few times at most.
+- A rectangular piece may be turned half round to its place, so a container's doors can end up at
+  the other end.
+- Reloading the mod with Ctrl+R while a load is in the air can leave that one piece without its
+  normal collision until the game is restarted.
 - A piece keeps the way it faced when it was picked up, turned to match its new place; it is not
   turned a quarter round to line up with its neighbours.
 - Only the stationary dock crane and the class 3 ship's deck cranes are moved. At any other kind of
@@ -154,6 +164,10 @@ To take them off duty, drag them back to Resting or into another position.
 Ctrl+R in game reloads UE4SS Lua mods without a restart, if `EnableHotReloadSystem = 1` is set in
 `ue4ss\UE4SS-settings.ini`. The mod does all its work from two timers on the game thread, one for
 decisions and one for steering the crane; key presses and hooks only queue work for them.
+
+For testing, the mod writes a lot to `ue4ss\UE4SS.log`: every latch attempt, why a piece was left
+alone, how high a load is carried and why, hand-overs, and a `BUMP:` line each time a load on the hook
+runs into other cargo, with where and in which step.
 
 The cranes' measurements, and what was learned about the game along the way, are in the
 [Ships At Sea game notes](https://github.com/foxyv/ShipsAtSeaLogistics/blob/master/docs/SHIPS_AT_SEA_GAME_NOTES.md).
