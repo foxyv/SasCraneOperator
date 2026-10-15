@@ -89,6 +89,34 @@ local function Log(text)
     print("[SasCraneOperator] " .. text .. "\n")
 end
 
+-- Reloading. A reload (Ctrl+R) starts a new copy of this script, and the old copy's timers and hooks
+-- may still be called for a moment while the game tears it down. Each copy writes its own id to a
+-- file at load; a copy whose id is no longer the one in the file has been replaced, and does nothing
+-- more, so it never touches the world while the new copy is setting itself up.
+InstancePath = ScriptDir .. "\\..\\instance.txt"
+InstanceId = string.format("%d-%d", os.time(), math.floor(os.clock() * 1000000) % 1000000)
+do
+    local file = io.open(InstancePath, "w")
+    if file then
+        file:write(InstanceId)
+        file:close()
+    end
+end
+StaleChecked, StaleNow = 0, false
+
+function Stale()
+    local now = os.clock()
+    if now - StaleChecked < 0.2 then return StaleNow end
+    StaleChecked = now
+    local file = io.open(InstancePath, "r")
+    if file then
+        local id = file:read("*a")
+        file:close()
+        StaleNow = id ~= nil and id ~= "" and id ~= InstanceId
+    end
+    return StaleNow
+end
+
 local function Toast(text)
     Log(text)
     local ok, err = pcall(function()
@@ -311,9 +339,34 @@ local function Resting(member)
     return not (ok and seated)
 end
 
+-- Where a crew member stands against a boat's crew positions, for seating a remembered operator:
+--   "resting"  no slot at all;
+--   "orphan"   a slot is named that is no position of this boat holding them (a load can leave this
+--              behind when the position did not exist yet), which the chart does not show anywhere;
+--   "ours"     the crane position, of this boat or another;
+--   "elsewhere" a real position of the boat that holds them.
+function SeatState(member, comp)
+    local old = nil
+    pcall(function() old = member.CrewSlot end)
+    if not Valid(old) then return "resting" end
+    if IsOurSlot(old) then return "ours" end
+    local listed, holds = false, false
+    pcall(function()
+        Each(comp.CrewGroups, function(group)
+            Each(group.CrewSlots, function(slot)
+                if Same(slot, old) then listed = true end
+            end)
+        end)
+        holds = Same(old.CrewMember, member)
+    end)
+    if listed and holds then return "elsewhere" end
+    return "orphan"
+end
+
 -- Keeps every position consistent: an operator who has left the boat is taken off, and a remembered
 -- operator who is aboard and resting is seated again (which is how a loaded save gets them back).
 local ChartTries = {}
+local SeatNoted = {}  -- member name -> when the reason for not seating them was last logged
 
 local function TendPositions()
     -- A chart that does not show the position of a boat that now has it reads the boat again.
@@ -353,9 +406,17 @@ local function TendPositions()
                 return
             end
             Each(comp.CrewMembers, function(candidate)
-                if not Valid(slot.CrewMember) and Operators[MemberName(candidate)] and Resting(candidate) then
+                local name = MemberName(candidate)
+                if Valid(slot.CrewMember) or not Operators[name] then return end
+                local state = SeatState(candidate, comp)
+                if state == "resting" or state == "orphan" then
+                    if state == "orphan" then Log(name .. " was left in a position this boat does not have; seating them as the crane operator") end
                     Seat(candidate, slot)
-                    Toast(MemberName(candidate) .. " is back on crane duty")
+                    Toast(name .. " is back on crane duty")
+                elseif os.clock() - (SeatNoted[name] or -1000) > 60 then
+                    SeatNoted[name] = os.clock()
+                    Log(string.format("%s is remembered as the crane operator but is %s, so is not seated", name,
+                        state == "elsewhere" and "in another of the boat's positions" or "in a crane position"))
                 end
             end)
         end)
@@ -484,7 +545,7 @@ local Hooked = {}
 
 local function HookChart()
     for path, handler in pairs(Hooks) do
-        if not Hooked[path] and pcall(RegisterHook, path, function(...) pcall(handler, ...) end) then
+        if not Hooked[path] and pcall(RegisterHook, path, function(...) if not Stale() then pcall(handler, ...) end end) then
             Hooked[path] = true
         end
     end
@@ -613,16 +674,21 @@ local function EngineRunning(boat)
     return false
 end
 
--- Is the boat ready to work cargo? Made fast to the dock with the pull-in finished, or, for a boat too
--- big to dock where its cargo has to go, lying still with its engines off.
+-- Is the boat ready to work cargo? Made fast to the dock with the pull-in finished (FormallyDocked),
+-- or, for a boat too big to dock where its cargo has to go, lying still with its engines off
+-- (LyingStill). The second is only enough for a boat working with cranes of its own: the dock's
+-- crane needs the boat made fast beside it.
 MOORED_SPEED_CM = 30
 
-local function IsDocked(boat)
+local function FormallyDocked(boat)
     local ok, docked = pcall(function()
         local docking = boat.DockingComponent
         return docking:IsDocked() and not docking.bIsPulling
     end)
-    if ok and docked then return true end
+    return ok and docked == true
+end
+
+local function LyingStill(boat)
     local velocity = boat:GetVelocity()
     return math.sqrt(velocity.X ^ 2 + velocity.Y ^ 2) <= MOORED_SPEED_CM and not EngineRunning(boat)
 end
@@ -632,7 +698,8 @@ end
 -- their own); any other uses the dock crane beside its hold.
 local function WorkSite(comp)
     local boat = comp:GetOwner()
-    if not IsDocked(boat) then return nil end
+    local formal = FormallyDocked(boat)
+    if not formal and not LyingStill(boat) then return nil end
     local hold = nil
     for _, area in ipairs(Live("CargoArea")) do
         if not hold and IsHold(area) and Same(area:GetAttachParentActor(), boat) then hold = area end
@@ -649,7 +716,7 @@ local function WorkSite(comp)
         local d = Dist(candidate:K2_GetActorLocation(), at)
         if d < craneDist and not Valid(candidate:GetAttachParentActor()) then crane, craneDist = candidate, d end
     end
-    if not crane then return nil end
+    if not crane or not formal then return nil end  -- the dock's crane works for a boat made fast
     return { boat = boat, hold = hold, cranes = { crane }, crane = crane, deck = false }
 end
 
@@ -889,8 +956,42 @@ local function FloorGap(grid, limit, size)
     return nil
 end
 
+-- Where a piece of this size can go in the grid when the floor has no gap for it: standing squarely
+-- on top of other pieces. Every cell under it must be filled by a piece that is staying where it is
+-- (not one still to be moved, and not the spot being cleared), and the cells it takes must be free.
+-- The lowest such place, or nil. Returns the cell and its height.
+local function StackGap(grid, limit, size, leaving)
+    for z = 1, limit.Z - size.Z do
+        for y = 0, limit.Y - size.Y do
+            for x = 0, limit.X - size.X do
+                local ok = true
+                for i = x, x + size.X - 1 do
+                    for j = y, y + size.Y - 1 do
+                        local under = grid[CellName(i, j, z - 1)]
+                        if under == nil or under == "reserved" or under == "kept" or leaving[under] then ok = false end
+                        if not ok then break end
+                    end
+                    if not ok then break end
+                end
+                if ok then
+                    for i = x, x + size.X - 1 do
+                        for j = y, y + size.Y - 1 do
+                            for k = z, z + size.Z - 1 do
+                                if grid[CellName(i, j, k)] then ok = false end
+                            end
+                        end
+                    end
+                end
+                if ok then return x, y, z end
+            end
+        end
+    end
+    return nil
+end
+
 -- Works out the moves that clear a space for a piece of this size. Returns the list of moves, each
--- { id, x, y }, in the order to make them, or nil if no spot can be cleared.
+-- { id, x, y, z }, in the order to make them, or nil if no spot can be cleared. A piece moved aside
+-- goes to a gap on the floor, or failing that on top of other pieces.
 local function PlanSpace(boxes, limit, want)
     local best = nil
     local shapes = { { X = want.X, Y = want.Y, Z = want.Z } }
@@ -950,9 +1051,11 @@ local function PlanSpace(boxes, limit, want)
                                 end
                             end
                             local x, y = FloorGap(grid, limit, box.size)
+                            local z = 0
+                            if not x then x, y, z = StackGap(grid, limit, box.size, inWay) end
                             if x then
-                                Fill(grid, { low = { X = x, Y = y, Z = 0 }, size = box.size }, box.id)
-                                moves[#moves + 1] = { id = box.id, x = x, y = y }
+                                Fill(grid, { low = { X = x, Y = y, Z = z }, size = box.size }, box.id)
+                                moves[#moves + 1] = { id = box.id, x = x, y = y, z = z }
                             else
                                 ok = false
                             end
@@ -969,6 +1072,233 @@ local function PlanSpace(boxes, limit, want)
     return best
 end
 
+-- Rearranging the whole hold. Clearing one spot fails when the pieces in the way have nowhere to go
+-- because the floor is full of other pieces that could themselves be stacked or slid together. This
+-- looks at the hold as a puzzle: it makes the move, of one piece that has nothing on it to a place it
+-- fits and stands squarely on the floor or on other pieces, that does the most to open a space for
+-- the waiting piece; then the next, until the space is there. Moves that turn out not to be needed
+-- are taken out again afterwards. The work is done on a copy of the grid; nothing moves until the
+-- plan is made.
+
+COMPACT_MOVES = 12        -- most moves in a plan
+COMPACT_BUDGET_S = 0.6    -- most time spent on one plan, in seconds
+
+-- Cells are numbered (z * Y + y) * X + x in a table; a state is a list of the pieces with where they are.
+function CompactGrid(state, lim)
+    local grid = {}
+    for i, p in ipairs(state) do
+        for z = p.z, p.z + p.sz - 1 do
+            for y = p.y, p.y + p.sy - 1 do
+                local row = (z * lim.Y + y) * lim.X
+                for x = p.x, p.x + p.sx - 1 do grid[row + x] = i end
+            end
+        end
+    end
+    return grid
+end
+
+-- How near the hold is to having a space for the piece: the most of its footprint that is free to
+-- its height in one spot (the goal is all of it), then the biggest free area of any shape, then how
+-- much floor is free at all. One number, larger is better.
+function CompactScore(grid, lim, want)
+    local height = math.min(want.Z, lim.Z)
+    local free, total = {}, 0
+    for x = 0, lim.X - 1 do
+        for y = 0, lim.Y - 1 do
+            local f = 1
+            for z = 0, height - 1 do
+                if grid[(z * lim.Y + y) * lim.X + x] then
+                    f = 0
+                    break
+                end
+            end
+            free[x * lim.Y + y] = f
+            total = total + f
+        end
+    end
+    local W = lim.Y + 1
+    local sum = {}
+    for x = 0, lim.X do sum[x * W] = 0 end
+    for y = 0, lim.Y do sum[y] = 0 end
+    for x = 1, lim.X do
+        for y = 1, lim.Y do
+            sum[x * W + y] = free[(x - 1) * lim.Y + (y - 1)] + sum[(x - 1) * W + y] + sum[x * W + y - 1] - sum[(x - 1) * W + y - 1]
+        end
+    end
+    local best = 0
+    local shapes = { { want.X, want.Y } }
+    if want.X ~= want.Y then shapes[2] = { want.Y, want.X } end
+    for _, shape in ipairs(shapes) do
+        local w, h = shape[1], shape[2]
+        for x0 = 0, lim.X - w do
+            for y0 = 0, lim.Y - h do
+                local n = sum[(x0 + w) * W + y0 + h] - sum[x0 * W + y0 + h] - sum[(x0 + w) * W + y0] + sum[x0 * W + y0]
+                if n > best then best = n end
+            end
+        end
+    end
+    local biggest, heights = 0, {}
+    for y = 0, lim.Y - 1 do heights[y] = 0 end
+    for x = 0, lim.X - 1 do
+        for y = 0, lim.Y - 1 do
+            heights[y] = free[x * lim.Y + y] == 1 and heights[y] + 1 or 0
+        end
+        local stack = {}
+        for y = 0, lim.Y do
+            local current = y < lim.Y and heights[y] or 0
+            local start = y
+            while #stack > 0 and stack[#stack][2] >= current do
+                local top = table.remove(stack)
+                local area = top[2] * (y - top[1])
+                if area > biggest then biggest = area end
+                start = top[1]
+            end
+            stack[#stack + 1] = { start, current }
+        end
+    end
+    return best * 1000000 + biggest * 1000 + total, best >= want.X * want.Y
+end
+
+-- Where piece i can go now: nothing may be on it, and the new place must be free and either on the
+-- floor or squarely on other pieces. Each is { x, y, z }.
+function CompactMoves(state, grid, lim, i)
+    local p = state[i]
+    local top = p.z + p.sz
+    if top < lim.Z then
+        for y = p.y, p.y + p.sy - 1 do
+            for x = p.x, p.x + p.sx - 1 do
+                if grid[(top * lim.Y + y) * lim.X + x] then return {} end
+            end
+        end
+    end
+    local out = {}
+    for nz = 0, lim.Z - p.sz do
+        for ny = 0, lim.Y - p.sy do
+            for nx = 0, lim.X - p.sx do
+                if not (nx == p.x and ny == p.y and nz == p.z) then
+                    local ok = true
+                    for y = ny, ny + p.sy - 1 do
+                        for x = nx, nx + p.sx - 1 do
+                            if nz > 0 then
+                                local under = grid[((nz - 1) * lim.Y + y) * lim.X + x]
+                                if under == nil or under == i then ok = false break end
+                            end
+                            for z = nz, nz + p.sz - 1 do
+                                local over = grid[(z * lim.Y + y) * lim.X + x]
+                                if over ~= nil and over ~= i then ok = false break end
+                            end
+                            if not ok then break end
+                        end
+                        if not ok then break end
+                    end
+                    if ok then out[#out + 1] = { nx, ny, nz } end
+                end
+            end
+        end
+    end
+    return out
+end
+
+function CompactMoved(state, i, at)
+    local copy = {}
+    for k, p in ipairs(state) do copy[k] = p end
+    local p = state[i]
+    copy[i] = { id = p.id, x = at[1], y = at[2], z = at[3], sx = p.sx, sy = p.sy, sz = p.sz, movable = p.movable }
+    return copy
+end
+
+function CompactSignature(state)
+    local parts = {}
+    for k, p in ipairs(state) do parts[k] = p.x .. "," .. p.y .. "," .. p.z end
+    return table.concat(parts, ";")
+end
+
+-- Plays a list of moves ({ index, x, y, z }) from the start, and says whether each is possible in its
+-- turn and the last leaves a space.
+function CompactReplay(start, moves, lim, want)
+    local state = start
+    for _, move in ipairs(moves) do
+        local grid = CompactGrid(state, lim)
+        local found = false
+        for _, at in ipairs(CompactMoves(state, grid, lim, move[1])) do
+            if at[1] == move[2] and at[2] == move[3] and at[3] == move[4] then
+                found = true
+                break
+            end
+        end
+        if not found then return false end
+        state = CompactMoved(state, move[1], { move[2], move[3], move[4] })
+    end
+    local _, done = CompactScore(CompactGrid(state, lim), lim, want)
+    return done
+end
+
+-- The moves ({ id, x, y, z }) that open a space of this size in the hold, or nil.
+function CompactSpace(boxes, lim, want)
+    local state = {}
+    for _, box in pairs(boxes) do
+        state[#state + 1] = { id = box.id, x = box.low.X, y = box.low.Y, z = box.low.Z,
+                              sx = box.size.X, sy = box.size.Y, sz = box.size.Z, movable = box.anchor ~= nil }
+    end
+    table.sort(state, function(a, b)
+        if a.x ~= b.x then return a.x < b.x end
+        if a.y ~= b.y then return a.y < b.y end
+        return a.z < b.z
+    end)
+    local start = state
+    local deadline = os.clock() + COMPACT_BUDGET_S
+    local seen, moved, plan = { [CompactSignature(state)] = true }, {}, {}
+    local _, done = CompactScore(CompactGrid(state, lim), lim, want)
+    while not done do
+        if #plan >= COMPACT_MOVES or os.clock() > deadline then return nil end
+        local grid = CompactGrid(state, lim)
+        local best, bestKey = nil, nil
+        for i, p in ipairs(state) do
+            if p.movable and (moved[i] or 0) < 2 then
+                for _, at in ipairs(CompactMoves(state, grid, lim, i)) do
+                    local candidate = CompactMoved(state, i, at)
+                    if not seen[CompactSignature(candidate)] then
+                        local key = CompactScore(CompactGrid(candidate, lim), lim, want)
+                        key = key * 10 - (moved[i] or 0) * 2 - (at[3] > 0 and 1 or 0)
+                        if not bestKey or key > bestKey then
+                            best, bestKey = { i, at[1], at[2], at[3] }, key
+                            best.state = candidate
+                        end
+                    end
+                end
+            end
+            if os.clock() > deadline then return nil end
+        end
+        if not best then return nil end
+        plan[#plan + 1] = best
+        moved[best[1]] = (moved[best[1]] or 0) + 1
+        state = best.state
+        seen[CompactSignature(state)] = true
+        _, done = CompactScore(CompactGrid(state, lim), lim, want)
+    end
+    -- Take out the moves that turn out not to be needed.
+    local shortened = true
+    while shortened and #plan > 1 do
+        shortened = false
+        for k = 1, #plan do
+            local trial = {}
+            for j, move in ipairs(plan) do
+                if j ~= k then trial[#trial + 1] = move end
+            end
+            if CompactReplay(start, trial, lim, want) then
+                plan = trial
+                shortened = true
+                break
+            end
+        end
+    end
+    local moves = {}
+    for _, move in ipairs(plan) do
+        moves[#moves + 1] = { id = start[move[1]].id, x = move[2], y = move[3], z = move[4] }
+    end
+    return moves
+end
+
 -- Plans the clearing of a space in the hold for a piece that does not fit. True if there is a plan.
 local function PlanTidy(site, waiting)
     if TidyRounds >= TIDY_ROUNDS then return false end
@@ -977,12 +1307,30 @@ local function PlanTidy(site, waiting)
     local theirs = Boxes(from)[waiting:GetRepresentedInventoryItem():GetAddress()]
     if not theirs then return false end
     local boxes, limit = Boxes(site.hold)
-    local moves = PlanSpace(boxes, { X = limit.X, Y = limit.Y, Z = limit.Z }, theirs.size)
+    local cells = { X = limit.X, Y = limit.Y, Z = limit.Z }
+    local moves = PlanSpace(boxes, cells, theirs.size)
+    local rearranged = false
+    if not moves then
+        local ok, found = pcall(CompactSpace, boxes, cells, theirs.size)
+        if not ok then Log("rearranging the hold failed: " .. tostring(found):gsub("\n.*", "")) end
+        if ok and found then
+            moves, rearranged = found, true
+        end
+    end
     local report = string.format("a %dx%dx%d piece does not fit: %s", theirs.size.X, theirs.size.Y, theirs.size.Z,
-        moves and (#moves .. " piece(s) to move aside") or "no spot can be cleared")
+        moves and (#moves .. (rearranged and " move(s) to rearrange the hold" or " piece(s) to move aside")) or "no spot can be cleared")
     if report ~= TidyReport then
         TidyReport = report
         Log(report)
+        if not moves then
+            local parts = {}
+            for _, box in pairs(boxes) do
+                parts[#parts + 1] = string.format("%dx%dx%d at %d,%d,%d", box.size.X, box.size.Y, box.size.Z, box.low.X, box.low.Y, box.low.Z)
+            end
+            table.sort(parts)
+            Log(string.format("TIDY: hold grid %dx%dx%d, %d piece(s): %s", limit.X, limit.Y, limit.Z, #parts,
+                table.concat(parts, "; "):sub(1, 1500)))
+        end
     end
     if not moves or #moves == 0 then return false end
     local actors = {}
@@ -997,7 +1345,7 @@ local function PlanTidy(site, waiting)
             return false
         end
         TidyPlan[#TidyPlan + 1] = { cargo = cargo, place = {
-            position = { X = move.x + box.anchor.X, Y = move.y + box.anchor.Y, Z = box.anchor.Z },
+            position = { X = move.x + box.anchor.X, Y = move.y + box.anchor.Y, Z = (move.z or 0) + box.anchor.Z },
             rotation = box.rotation } }
     end
     return true
@@ -1105,14 +1453,14 @@ local function NextMove(site, load, unload)
         local ok, clear = pcall(ClearAbove, site, cargo)
         if ok and clear and clear ~= "blocked" then return clear end
         if not (ok and clear == "blocked") then
-            local fallback = nil
             for _, dock in ipairs(docks) do
                 local place, handOver = PlaceInReach(site, dock.area, cargo)
                 if handOver then return handOver end
                 if place then
                     local move = { cargo = cargo, to = dock.area, place = place }
-                    if not site.deck or CanReach(site, move) then return move end
-                    fallback = fallback or move
+                    -- Only where a crane really gets the piece to: the game would put it in any dock
+                    -- area, however far from the boat, and the piece would simply appear there.
+                    if MoveWithinReach(site, move) then return move end
                 end
             end
             if site.deck then
@@ -1122,7 +1470,16 @@ local function NextMove(site, load, unload)
                 if not ok2 then Log("planning a hand-over failed: " .. tostring(relay):gsub("\n.*", "")) end
                 if ok2 and relay then return relay end
             end
-            if fallback then return fallback end
+            -- No dock area is within reach of a crane from here: the piece stays where it is until
+            -- the boat is somewhere else. (The mark is not lost; it is looked at again after moving.)
+            local guid = CargoGuid(cargo)
+            if guid and not Unreachable[guid] then
+                Unreachable[guid] = true
+                local name = "piece"
+                pcall(function() name = cargo:GetRepresentedInventoryItem():GetDisplayName():ToString() end)
+                Log("no dock area is within reach of the crane for the " .. ClassName(cargo) .. "; leaving it aboard")
+                Toast("The " .. name .. " cannot be put ashore from here: the dock is out of the crane's reach")
+            end
         end
     end
     -- Pieces the cranes can get to first; bringing others closer comes after.
@@ -1163,6 +1520,7 @@ local function NextMove(site, load, unload)
                     local okPlace, place = pcall(StagingPlace, site, dock.area, cargo)
                     if okPlace and place then
                         Staged[guid] = true  -- brought over once; if it is still out of reach after, it stays put
+                        Log("bringing the " .. ClassName(cargo) .. " to the " .. ClassName(dock.area) .. " first: it is out of the crane's reach where it stands")
                         return { cargo = cargo, to = dock.area, place = place, settle = true, stage = true }
                     end
                 end
@@ -1404,6 +1762,10 @@ local DockCrane = {
     parked = { swivel = 0, hoist = 0, telescope = 0, drum = DRUM_MIN },
     wraps = true,
     hookBelow = 53,
+    -- The furthest a piece can stand from the crane's base, in the plane, for the hook to get over
+    -- it with the boom fully run out (with a margin). Beyond that the arm below stops at full
+    -- stretch, short of the piece, and the piece would be pulled to the hook instead.
+    maxOut = (BOOM_CM + TELESCOPE_MAX * TELESCOPE_CM_PER_UNIT) * math.cos(math.rad(BOOM_DROOP_DEG)) - BOOM_BACK_CM - 15,
 }
 
 function DockCrane.Arm(crane, point)
@@ -1527,10 +1889,111 @@ local function There(crane, model, goal, loose)
     return true
 end
 
+-- Crane sounds. The game plays a crane's motor sounds from its controls: each tick the blueprint is
+-- told how hard each part is being driven and how fast it moves (Update...SoundLoop). The operator
+-- moves the joints by their targets, not the controls, so nothing tells it and the crane is silent.
+-- This tells it instead, from how fast each joint actually moved since the last step.
+SOUND_PARTS = { swivel = "UpdateRotatorSoundLoop", hoist = "UpdateHoistSoundLoop", bend = "UpdateHoistSoundLoop",
+                telescope = "UpdateBoomSoundLoop", drum = "UpdateCableSoundLoop", turn = "UpdateHookSoundLoop" }
+SoundLast = nil       -- { crane, values = part -> joint value at the last step, at = os.clock() }
+SoundReported = false
+SOUND_IDLE_SECONDS = 1.5
+SoundIdleSince = nil
+SoundPlaying = false  -- the motor loop has been started by the mod and not yet stopped
+
+-- The Update...SoundLoop functions only set parameters (pitch and volume) on the crane's loop sound;
+-- the loop itself, and a start and a stop sound, are played by the game when somebody takes the
+-- controls. The operator never does, so the loop is started here and stopped when the crane is idle.
+function SoundComponent(crane, property)
+    local ok, comp = pcall(function() return crane[property] end)
+    if ok and Valid(comp) then return comp end
+    return nil
+end
+
+function StartMotorSound(crane)
+    if SoundPlaying then return end
+    SoundPlaying = true
+    local start, loop = SoundComponent(crane, "CraneStartComp"), SoundComponent(crane, "CraneLoopComp")
+    if start then pcall(function() start:Play(0.0) end) end
+    if loop then
+        local ok, err = pcall(function() loop:Play(0.0) end)
+        Log("crane sounds: loop " .. (ok and "started" or ("failed to start: " .. tostring(err):gsub("\n.*", ""))))
+    else
+        Log("crane sounds: this crane has no loop sound component")
+    end
+end
+
+function StopMotorSound(crane)
+    if not SoundPlaying then return end
+    SoundPlaying = false
+    local stop, loop = SoundComponent(crane, "CraneStopComp"), SoundComponent(crane, "CraneLoopComp")
+    if loop then pcall(function() loop:Stop() end) end
+    if stop then pcall(function() stop:Play(0.0) end) end
+end
+
+function CraneSounds(crane, model)
+    local now = os.clock()
+    local last = SoundLast
+    local values = {}
+    for part, name in pairs(model.joints) do
+        local ok, v = pcall(function() return crane[name]:GetCurrentValue() end)
+        if ok then values[part] = v end
+    end
+    SoundLast = { crane = crane, values = values, at = now }
+    if not last or not Same(last.crane, crane) or not model then return end
+    local dt = math.max(now - last.at, 0.01)
+    local loudest = {}  -- one call per sound loop, from the part driving it hardest
+    for part, v in pairs(values) do
+        local fn = SOUND_PARTS[part]
+        if fn and last.values[part] then
+            local diff = v - last.values[part]
+            if part == "swivel" and model.wraps then diff = Turn(diff) end
+            local velocity = diff / dt
+            local drive = Clamp(velocity / math.max(model.speed[part] or 1, 0.001), -1, 1)
+            if not loudest[fn] or math.abs(drive) > math.abs(loudest[fn].drive) then
+                loudest[fn] = { drive = drive, velocity = velocity }
+            end
+        end
+    end
+    local moving = false
+    for _, d in pairs(loudest) do
+        if math.abs(d.drive) > 0.05 then moving = true end
+    end
+    if moving then StartMotorSound(crane) end
+    for fn, d in pairs(loudest) do
+        local ok, err = pcall(function() crane[fn](crane, d.drive, d.velocity) end)
+        if not SoundReported then
+            SoundReported = true
+            Log("crane sounds: " .. fn .. (ok and " called" or (" failed: " .. tostring(err):gsub("\n.*", ""))))
+        end
+    end
+end
+
+-- Quiets the motor sounds once the crane stops.
+function CraneSoundsStop(crane)
+    if not Valid(crane) then return end
+    for _, fn in pairs(SOUND_PARTS) do pcall(function() crane[fn](crane, 0.0, 0.0) end) end
+    StopMotorSound(crane)
+    SoundLast = nil
+end
+
 -- One step of every joint towards its goal, at that joint's speed.
 local function SteerStep()
     local s = Steer
-    if not s then return end
+    if not s then
+        -- The motor is let run on through the short gaps between the steps of a route, and shut off
+        -- only once the crane has been still for a moment.
+        if SoundLast then
+            SoundIdleSince = SoundIdleSince or os.clock()
+            if os.clock() - SoundIdleSince > SOUND_IDLE_SECONDS then
+                CraneSoundsStop(SoundLast.crane)
+                SoundIdleSince = nil
+            end
+        end
+        return
+    end
+    SoundIdleSince = nil
+    pcall(CraneSounds, s.crane, s.model)
     if not Valid(s.crane) then
         Steer = nil
         return
@@ -1655,6 +2118,19 @@ local function ChooseCrane(site, move, character)
             pick.X, pick.Y, pick.Z, drop.X, drop.Y, drop.Z))
     end
     return nearest, false
+end
+
+-- Can a crane of the site really take this piece from where it is to where it is going? A deck
+-- crane is asked its arm model. The dock crane's boom is as long as it is: the piece and its place
+-- must both be within it.
+function MoveWithinReach(site, move)
+    if site.deck then return CanReach(site, move) end
+    local model = ModelOf(site.crane)
+    if not model or not model.maxOut then return true end
+    local ok, pick, drop = pcall(JobPoints, move)
+    if not ok or not pick or not drop then return false end
+    local base = site.crane:K2_GetActorLocation()
+    return Dist(pick, base) <= model.maxOut and Dist(drop, base) <= model.maxOut
 end
 
 CanReach = function(site, move)
@@ -1849,11 +2325,32 @@ end
 NeedsStaging = function(site, cargo)
     local at = site.crane:K2_GetActorLocation()
     if Dist(cargo:K2_GetActorLocation(), at) > CARGO_REACH_CM then return true end
-    return site.deck and #Pickers(site, cargo) == 0
+    if not site.deck then
+        -- A dock crane's boom only runs out so far: a piece standing further than that, say in the
+        -- dock area on the far side, is brought to the nearer area first, not pulled to the hook.
+        local model = ModelOf(site.crane)
+        if model and model.maxOut and Dist(PickPoint(cargo), at) > model.maxOut then return true end
+        return false
+    end
+    return #Pickers(site, cargo) == 0
 end
 
 StagingPlace = function(site, area, cargo)
-    if not site.deck then return FindPlace(area, cargo) end
+    if not site.deck then
+        local model = ModelOf(site.crane)
+        if model and model.maxOut then
+            -- The neatest place in the area that the boom reaches, nearest the crane first.
+            local base = site.crane:K2_GetActorLocation()
+            for _, spot in ipairs(Neatest(FreeSpots(area, cargo), base, PLACES_TRIED)) do
+                if FitsAt(area, cargo, spot.place) then
+                    local _, at = JobPoints({ cargo = cargo, to = area, place = spot.place })
+                    if at and Dist(at, base) <= model.maxOut then return spot.place end
+                end
+            end
+            Log("no place in the " .. ClassName(area) .. " is within reach of the crane for the " .. ClassName(cargo))
+        end
+        return FindPlace(area, cargo)
+    end
     local spots = FreeSpots(area, cargo)
     for _, crane in ipairs(site.cranes) do
         for _, spot in ipairs(Neatest(spots, crane:K2_GetActorLocation(), PLACES_TRIED)) do
@@ -2274,10 +2771,56 @@ local function Unslim(except)
     end
 end
 
+-- Drop telemetry. ServerDetachCargo is given the place in the area the piece is to take, and the game
+-- puts the piece there, so a piece released a little off it jumps the last bit. DROP: lines record
+-- where the piece was when let go, where it was sent, and (DROP+: a second later) where it ended up.
+DropWatch = {}  -- { cargo, label, at, released, target }
+
+local function Where(p)
+    return p and string.format("%.0f %.0f %.0f", p.X, p.Y, p.Z) or "?"
+end
+
+function DropNote(label, crane, cargo, area, place)
+    local ok, err = pcall(function()
+        local at = cargo:K2_GetActorLocation()
+        local hook = HookNow(crane)
+        local want = place and place.position
+        local d3 = want and math.sqrt((at.X - want.X) ^ 2 + (at.Y - want.Y) ^ 2 + (at.Z - want.Z) ^ 2) or -1
+        Log(string.format("DROP: %s the %s into the %s | piece at %s | hook at %s | sent to %s | %.0f cm from it | rotation %s",
+            label, ClassName(cargo), ClassName(area), Where(at), Where(hook), Where(want), d3,
+            place and place.rotation and string.format("%.0f", place.rotation.Yaw or 0) or "?"))
+        DropWatch[#DropWatch + 1] = { cargo = cargo, label = label, at = os.clock(), released = at, target = want }
+    end)
+    if not ok then Log("DROP: could not be recorded: " .. tostring(err):gsub("\n.*", "")) end
+end
+
+function DropWatchTick()
+    local keep = {}
+    for _, w in ipairs(DropWatch) do
+        if os.clock() - w.at >= 1.0 then
+            pcall(function()
+                if not Valid(w.cargo) then
+                    Log("DROP+: the " .. w.label .. " piece is gone")
+                    return
+                end
+                local now = w.cargo:K2_GetActorLocation()
+                local moved = math.sqrt((now.X - w.released.X) ^ 2 + (now.Y - w.released.Y) ^ 2 + (now.Z - w.released.Z) ^ 2)
+                local off = w.target and math.sqrt((now.X - w.target.X) ^ 2 + (now.Y - w.target.Y) ^ 2 + (now.Z - w.target.Z) ^ 2) or -1
+                Log(string.format("DROP+: the %s now at %s: moved %.0f cm since release, %.0f cm from where it was sent",
+                    ClassName(w.cargo), Where(now), moved, off))
+            end)
+        else
+            keep[#keep + 1] = w
+        end
+    end
+    DropWatch = keep
+end
+
 local function SetDown(job)
     if not Valid(job.crane) or not Valid(job.cargo) then return end
     local arrived = false
     if Same(job.crane.AttachedCargo, job.cargo) then
+        DropNote("setting down", job.crane, job.cargo, job.to, job.place)
         job.crane:ServerDetachCargo(job.to, job.place.position, job.place.rotation)
         arrived = true
     elseif Same(job.cargo.CargoArea, job.to) then
@@ -2500,11 +3043,39 @@ local function JobStep()
         if job.model.feel then
             -- Let the hook down by watching it, not by the model: it has to end up on the piece's
             -- lifting point, which the model alone does not get close enough to.
-            job.phase, job.ticks, job.lastHook, job.still = "descend", 0, nil, 0
+            job.phase, job.ticks, job.aims, job.aimPick = "aim pick", 0, 0, nil
             Steer = nil
         else
             Goto(job, WithDrum(job.arm.pose, DrumFor(job.model, job.arm.tipZ, job.pick.Z)))
             job.phase = "attach"
+        end
+    elseif job.phase == "aim pick" then
+        -- Puts the hook squarely over the piece's lifting point before it comes down: where the hook
+        -- actually is against where the point is, and the arm moved by the difference, until it is
+        -- within a few centimetres. The model of the arm alone can leave it half a metre or more off.
+        if job.ticks % 8 ~= 0 or (Steer ~= nil and seconds < 3) then return end
+        local hook = job.crane.HookJoint:K2_GetComponentLocation()
+        local lift = job.cargo.CargoHook:K2_GetComponentLocation()
+        local ex, ey = lift.X - hook.X, lift.Y - hook.Y
+        local off = math.sqrt(ex * ex + ey * ey)
+        if off <= 4 or job.aims >= 5 then
+            Log(string.format("AIM: hook %.0f cm from the %s's lifting point after %d correction(s)", off, ClassName(job.cargo), job.aims))
+            job.phase, job.ticks, job.lastHook, job.still = "descend", 0, nil, 0
+            Steer = nil
+            return
+        end
+        job.aims = job.aims + 1
+        job.aimPick = job.aimPick or { X = job.pick.X, Y = job.pick.Y, Z = job.pick.Z }
+        job.aimPick = { X = job.aimPick.X + ex, Y = job.aimPick.Y + ey, Z = job.aimPick.Z }
+        local arm = job.model.Arm(job.crane, job.aimPick, job.arm.tipZ)
+        if arm then
+            job.arm = arm
+            local drum = job.crane[job.model.joints.drum]:GetCurrentValue()
+            Steer = { crane = job.crane, model = job.model, goal = WithDrum(arm.pose, drum) }
+            job.ticks = 0
+        else
+            Log(string.format("AIM: the arm cannot get the hook the last %.0f cm over the %s; going down from here", off, ClassName(job.cargo)))
+            job.aims = 99
         end
     elseif job.phase == "descend" then
         if job.ticks % 3 ~= 0 then return end
@@ -2761,6 +3332,7 @@ local function Work()
                 local place = FindPlace(back, held)
                 if place then
                     Log("a piece was left on the hook, setting it down where there is room")
+                    DropNote("left on the hook, setting down", crane, held, back, place)
                     crane:ServerDetachCargo(back, place.position, place.rotation)
                 end
                 return
@@ -3121,8 +3693,129 @@ end)
 
 local Ticks = 0
 
+-- Timing telemetry. A frame hitch is a call that takes long on the game thread, so every heavy
+-- function is timed. PROFILE: lines say, once a minute, which functions took the most in total; SLOW:
+-- lines are one call, or one whole step of the mod, that held the game up for too long.
+SLOW_CALL_MS = 25
+SLOW_STEP_MS = 40
+Prof = {}          -- name -> { calls, total, worst } since the last report
+ProfReportAt = os.clock() + 60
+
+function ProfAdd(name, ms)
+    local p = Prof[name]
+    if not p then
+        p = { calls = 0, total = 0, worst = 0 }
+        Prof[name] = p
+    end
+    p.calls, p.total, p.worst = p.calls + 1, p.total + ms, math.max(p.worst, ms)
+    if ms >= SLOW_CALL_MS then Log(string.format("SLOW: %s took %.0f ms", name, ms)) end
+end
+
+function Profile(name, fn)
+    return function(...)
+        local t0 = os.clock()
+        local r = table.pack(fn(...))
+        ProfAdd(name, (os.clock() - t0) * 1000)
+        return table.unpack(r, 1, r.n)
+    end
+end
+
+function ProfReport()
+    if os.clock() < ProfReportAt then return end
+    ProfReportAt = os.clock() + 60
+    local rows = {}
+    for name, p in pairs(Prof) do rows[#rows + 1] = { name = name, p = p } end
+    Prof = {}
+    if #rows == 0 then return end
+    table.sort(rows, function(a, b) return a.p.total > b.p.total end)
+    local parts = {}
+    for i = 1, math.min(#rows, 8) do
+        local r = rows[i]
+        parts[#parts + 1] = string.format("%s %d call(s) %.0f ms total, worst %.0f", r.name, r.p.calls, r.p.total, r.p.worst)
+    end
+    Log("PROFILE (last minute): " .. table.concat(parts, " | "))
+end
+
+-- The heavy calls, timed wherever they are made from. In a function of its own, which has its own
+-- allowance of local variables.
+function InstallProfiling()
+for _, spec in ipairs({
+    { "NextMove", function() return NextMove end, function(f) NextMove = f end },
+    { "UpdateMarkers", function() return UpdateMarkers end, function(f) UpdateMarkers = f end },
+    { "UpdateHint", function() return UpdateHint end, function(f) UpdateHint = f end },
+    { "Boxes", function() return Boxes end, function(f) Boxes = f end },
+    { "FreeSpots", function() return FreeSpots end, function(f) FreeSpots = f end },
+    { "DockAreas", function() return DockAreas end, function(f) DockAreas = f end },
+    { "ClearAbove", function() return ClearAbove end, function(f) ClearAbove = f end },
+    { "PlanTidy", function() return PlanTidy end, function(f) PlanTidy = f end },
+    { "PlaceInReach", function() return PlaceInReach end, function(f) PlaceInReach = f end },
+    { "NeedsStaging", function() return NeedsStaging end, function(f) NeedsStaging = f end },
+    { "StagingPlace", function() return StagingPlace end, function(f) StagingPlace = f end },
+    { "Relay", function() return Relay end, function(f) Relay = f end },
+    { "TravelTip", function() return TravelTip end, function(f) TravelTip = f end },
+    { "WatchBumps", function() return WatchBumps end, function(f) WatchBumps = f end },
+    { "CraneSounds", function() return CraneSounds end, function(f) CraneSounds = f end },
+    { "SteadyStep", function() return SteadyStep end, function(f) SteadyStep = f end },
+    { "EnsurePositions", function() return EnsurePositions end, function(f) EnsurePositions = f end },
+    { "TendPositions", function() return TendPositions end, function(f) TendPositions = f end },
+    { "HookChart", function() return HookChart end, function(f) HookChart = f end },
+    { "LookedAtCargo", function() return LookedAtCargo end, function(f) LookedAtCargo = f end },
+    { "FindPlace", function() return FindPlace end, function(f) FindPlace = f end },
+    { "FindFloating", function() return FindFloating end, function(f) FindFloating = f end },
+    { "JobPoints", function() return JobPoints end, function(f) JobPoints = f end },
+    { "Live", function() return Live end, function(f) Live = f end },
+}) do
+    local current = spec[2]()
+    if type(current) == "function" then spec[3](Profile(spec[1], current)) end
+end
+end
+InstallProfiling()
+
+-- A gap between two steps much longer than the timer's own interval means the game thread was held
+-- up by something other than this mod. LastTickAt is the wall clock time of the step before.
+LastTickAt = nil
+
+function Lap(laps, name)
+    local now = os.clock()
+    laps[#laps + 1] = string.format("%s %.0f", name, (now - laps.at) * 1000)
+    laps.at = now
+end
+
+-- What an earlier copy of the mod may have left behind: a piece let go with its collision off,
+-- because the copy was replaced while the piece was on the hook. Pieces a crane is holding now keep
+-- theirs off.
+function RestoreAfterReload()
+    local held = {}
+    for _, crane in ipairs(FindAllOf("CargoCrane") or {}) do
+        pcall(function()
+            local cargo = crane.AttachedCargo
+            if Valid(cargo) then held[cargo:GetAddress()] = true end
+        end)
+    end
+    local fixed = 0
+    for _, cargo in ipairs(FindAllOf("HeavyCargo") or {}) do
+        pcall(function()
+            if not cargo:GetFullName():find("Default__", 1, true) and not held[cargo:GetAddress()]
+                and not cargo:GetActorEnableCollision() then
+                cargo:SetActorEnableCollision(true)
+                fixed = fixed + 1
+            end
+        end)
+    end
+    if fixed > 0 then Log("after a reload: collision switched back on for " .. fixed .. " piece(s) left without it") end
+end
+
 LoopInGameThreadWithDelay(TICK_MS, function()
+    if Stale() then return false end
+    local stepStart = os.clock()
+    local laps = { at = stepStart }
+    if LastTickAt and stepStart - LastTickAt > 1.0 then
+        Log(string.format("HITCH: %.1f s since the last step; the game thread was away (job: %s, steering: %s)",
+            stepStart - LastTickAt, Job and tostring(Job.phase) or "none", Steer and "yes" or "no"))
+    end
+    LastTickAt = stepStart
     Ticks = Ticks + 1
+    if #DropWatch > 0 then pcall(DropWatchTick) end
     if #Requests > 0 then
         local waiting = {}
         for _, request in ipairs(Requests) do
@@ -3163,23 +3856,35 @@ LoopInGameThreadWithDelay(TICK_MS, function()
         local ok, err = pcall(SetSpotHere)
         if not ok then Log("setting the spot failed: " .. tostring(err):gsub("\n.*", "")) end
     end
+    Lap(laps, "requests")
+    if Ticks == 6 then pcall(RestoreAfterReload) end
     if Ticks % 2 == 0 then pcall(UpdateMarkers) end
+    Lap(laps, "markers")
     pcall(UpdateHint)
+    Lap(laps, "hint")
     if Ticks % 4 == 0 then
         pcall(EnsurePositions)
         pcall(TendPositions)
         pcall(HookChart)
     end
+    Lap(laps, "positions")
     local ok, err = pcall(Work)
     if not ok then
         Job = nil
         Rest = math.floor(10000 / TICK_MS)
         Log("work failed: " .. tostring(err):gsub("\n.*", ""))
     end
+    Lap(laps, "work")
+    local took = (os.clock() - stepStart) * 1000
+    if took >= 25 then Log(string.format("SLOW step breakdown (ms): %s", table.concat(laps, ", "))) end
+    ProfAdd("whole 0.5 s step", took)
+    ProfReport()
     return false
 end)
 
 LoopInGameThreadWithDelay(MOTION_MS, function()
+    if Stale() then return false end
+    local stepStart = os.clock()
     pcall(SteadyStep)
     local ok, err = pcall(JobStep)
     if not ok then
@@ -3192,6 +3897,7 @@ LoopInGameThreadWithDelay(MOTION_MS, function()
         Steer = nil
         Log("steering the crane failed: " .. tostring(err):gsub("\n.*", ""))
     end
+    ProfAdd("whole 0.1 s step", (os.clock() - stepStart) * 1000)
     return false
 end)
 

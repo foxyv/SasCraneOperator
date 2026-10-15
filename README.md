@@ -10,8 +10,12 @@ own Engineering positions. Put a hired crew member in it and, whenever the boat 
 and unload the cargo that has been marked, one piece at a time:
 
 - **The class 1 and 2 boats** use the dock crane beside their hold.
+  The boat has to be made fast to the dock, with the pull-in finished, for the dock crane to work.
 - **The class 3 cargo ship** uses its own deck cranes, one or two, never the dock's. Large-container
-  docks have no crane of their own, so this is how large containers get on and off.
+  docks have no crane of their own, so this is how large containers get on and off. It may be
+  docked, or, where the dock it needs has no place to moor beside, lying still with its engines
+  off. It only puts cargo ashore at a dock area one of its cranes really reaches; otherwise the
+  piece stays aboard, with a toast.
 
 Cargo gets marked in two ways:
 
@@ -141,6 +145,11 @@ To take them off duty, drag them back to Resting or into another position.
   the crane is caught on something anyway, it lifts a metre and carries on, a few times at most.
 - A rectangular piece may be turned half round to its place, so a container's doors can end up at
   the other end.
+- When a piece to load does not fit, the operator works out moves across the whole hold: flat pieces
+  are stacked, others slid together, until the piece has a space. Each move is a full crane job, so a
+  crowded hold takes a while. It does not check that every move is within the crane's reach.
+- The crane's motor sounds are played by the mod, since the operator does not use the controls. They
+  start when the crane moves and stop after it has been still for a moment.
 - Reloading the mod with Ctrl+R while a load is in the air can leave that one piece without its
   normal collision until the game is restarted.
 - A piece keeps the way it faced when it was picked up, turned to match its new place; it is not
@@ -165,12 +174,16 @@ To take them off duty, drag them back to Resting or into another position.
 ```
 
 Ctrl+R in game reloads UE4SS Lua mods without a restart, if `EnableHotReloadSystem = 1` is set in
-`ue4ss\UE4SS-settings.ini`. The mod does all its work from two timers on the game thread, one for
-decisions and one for steering the crane; key presses and hooks only queue work for them.
+`ue4ss\UE4SS-settings.ini`, but it has frozen or crashed the game more than once, so restart the game
+to try a change. The mod does all its work from two timers on the game thread, one for decisions and
+one for steering the crane; key presses and hooks only queue work for them.
 
 For testing, the mod writes a lot to `ue4ss\UE4SS.log`: every latch attempt, why a piece was left
 alone, how high a load is carried and why, hand-overs, and a `BUMP:` line each time a load on the hook
-runs into other cargo, with where and in which step.
+runs into other cargo, with where and in which step. It also writes a `DROP:` line for every set-down
+(where the piece was let go, where it was sent, and a second later where it ended up), an `AIM:` line
+for how close the hook was over a piece before it came down, `PROFILE:` and `SLOW:` lines saying
+where the mod's time goes, and `HITCH:` when the game thread was away for over a second.
 
 The cranes' measurements, and what was learned about the game along the way, are in the
 [Ships At Sea game notes](https://github.com/foxyv/ShipsAtSeaLogistics/blob/master/docs/SHIPS_AT_SEA_GAME_NOTES.md).
