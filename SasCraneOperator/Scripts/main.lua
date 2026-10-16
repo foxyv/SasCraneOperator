@@ -363,6 +363,121 @@ function SeatState(member, comp)
     return "orphan"
 end
 
+-- A remembered operator the game did not put back on their boat when the save loaded. The save names
+-- the crane position as their slot, which did not exist yet while the boat was loading, and they are
+-- left holding the boat's key but with no boat: not in the boat's crew, so not in the crew chart at
+-- all. (Taking them off the boat and putting them on again by hand mends it; this does the same.)
+-- The game is asked to read the boat key again first, then the link is written by hand.
+RelinkTries = {}
+
+function RelinkOperators(comp, boat)
+    local key = nil
+    pcall(function() key = GuidStr(boat:GetBoatKey().ID) end)
+    if not key then return end
+    local function listed(member)
+        local found = false
+        Each(comp.CrewMembers, function(candidate)
+            if Same(candidate, member) then found = true end
+        end)
+        return found
+    end
+    for _, company in ipairs(Live("SasCompanyCrewComponent")) do
+        pcall(function()
+            Each(company.CrewMembers, function(member)
+                local name = MemberName(member)
+                if not Operators[name] then return end
+                local memberKey = nil
+                pcall(function() memberKey = GuidStr(member.BoatKey.ID) end)
+                if memberKey ~= key then return end
+                if Valid(member.Boat) and listed(member) then return end
+                RelinkTries[name] = (RelinkTries[name] or 0) + 1
+                if RelinkTries[name] > 2 then return end
+                Log(name .. " holds this boat's key but is not on it; putting them back on the boat (try " .. RelinkTries[name] .. ")")
+                pcall(function() member:OnRep_BoatKey() end)
+                if not (Valid(member.Boat) and listed(member)) then
+                    pcall(function() member.Boat = boat end)
+                    if not listed(member) then
+                        local before, members = {}, {}
+                        Each(comp.CrewMembers, function(candidate)
+                            before[#before + 1] = candidate
+                            members[#members + 1] = candidate
+                        end)
+                        members[#members + 1] = member
+                        comp.CrewMembers = members
+                        pcall(function() comp:OnRep_CrewMembers(before) end)
+                    end
+                    pcall(function() member:OnRep_Boat(nil) end)
+                end
+                Log(string.format("%s is now %son the boat and %slisted by it", name,
+                    Same(member.Boat, boat) and "" or "NOT ", listed(member) and "" or "NOT "))
+                pcall(function() RereadCharts(comp) end)
+            end)
+        end)
+    end
+end
+
+-- Where every crew member stands against every cargo boat, for the log: whether the boat lists them,
+-- what slot they name and whether that slot is one the boat has and holds them. Written once a few
+-- seconds after a boat gets its crane position, and on Ctrl+Alt+D.
+CrewDumped = {}   -- boat component address -> true
+CrewDumpWanted = false
+
+function DumpCrew(reason)
+    Log("CREW: " .. reason)
+    -- The boats and the key the game files each under, to set against the key each crew member holds.
+    local keys = {}
+    for _, owned in ipairs(Live("CompanyOwnedBoatsComponent")) do
+        pcall(function()
+            owned.ActiveBoats:ForEach(function(key, value)
+                local boat = value:get()
+                if Valid(boat) then keys[boat:GetAddress()] = GuidStr(key:get().ID) end
+            end)
+        end)
+    end
+    local listedBy = {}   -- member address -> the boat that lists them
+    for _, comp in ipairs(Live("SasBoatCrewComponent")) do
+        pcall(function()
+            local boat = comp:GetOwner()
+            if not Valid(boat) or not ClassName(boat):find("Cargo_Boat", 1, true) then return end
+            Each(comp.CrewMembers, function(member) listedBy[member:GetAddress()] = ClassName(boat) end)
+            local boatKey = keys[boat:GetAddress()]
+            pcall(function() boatKey = boatKey or GuidStr(boat:GetBoatKey().ID) end)
+            Log(string.format("CREW: %s (key %s), crane position %s, %d listed crew member(s)", ClassName(boat),
+                boatKey or "?", CraneSlot(comp) and "yes" or "NO", Count(comp.CrewMembers)))
+        end)
+    end
+    for _, company in ipairs(Live("SasCompanyCrewComponent")) do
+        pcall(function()
+            Each(company.CrewMembers, function(member)
+                pcall(function()
+                    local name = MemberName(member)
+                    local boat, assigned = "none", "?"
+                    pcall(function() if Valid(member.Boat) then boat = ClassName(member.Boat) end end)
+                    pcall(function() assigned = tostring(member:IsAssignedToBoat()) end)
+                    local old = nil
+                    pcall(function() old = member.CrewSlot end)
+                    local slotText = "no slot"
+                    if Valid(old) then
+                        local group, holds = "?", false
+                        pcall(function() group = old.CrewGroup.GroupName:ToString() end)
+                        pcall(function() holds = Same(old.CrewMember, member) end)
+                        slotText = string.format("slot in group '%s'%s", group, holds and "" or " that does not hold them")
+                    end
+                    local index, category = -1, "?"
+                    pcall(function() index = member.CrewSlotId.SlotIndex end)
+                    pcall(function() category = member.CrewSlotId.TaskGroupCategory:GetFName():ToString() end)
+                    local key = "?"
+                    pcall(function() key = GuidStr(member.BoatKey.ID) end)
+                    Log(string.format("CREW:   %s: remembered operator %s, Boat %s, boat key %s, assigned to a boat %s, listed by %s, %s, named slot %s #%d",
+                        name, Operators[name] and "yes" or "no", boat, key, assigned, listedBy[member:GetAddress()] or "no boat",
+                        slotText, category, index))
+                end)
+            end)
+        end)
+    end
+end
+RegisterKeyBind(Key.D, { ModifierKey.CONTROL, ModifierKey.ALT }, function() CrewDumpWanted = true end)
+
 -- Keeps every position consistent: an operator who has left the boat is taken off, and a remembered
 -- operator who is aboard and resting is seated again (which is how a loaded save gets them back).
 local ChartTries = {}
@@ -394,6 +509,16 @@ local function TendPositions()
             local slot = CraneSlot(comp)
             if not slot then return end
             local boat = comp:GetOwner()
+            local key = comp:GetAddress()
+            if os.clock() > 0 then pcall(RelinkOperators, comp, boat) end
+            if not CrewDumped[key] then
+                CrewDumpedAt = CrewDumpedAt or {}
+                CrewDumpedAt[key] = CrewDumpedAt[key] or os.clock()
+                if os.clock() - CrewDumpedAt[key] > 8 then
+                    CrewDumped[key] = true
+                    DumpCrew("after the crane position was added to " .. ClassName(boat))
+                end
+            end
             local member = slot.CrewMember
             if Valid(member) then
                 if not Same(member.Boat, boat) or not Same(member.CrewSlot, slot) then
@@ -3850,6 +3975,10 @@ LoopInGameThreadWithDelay(TICK_MS, function()
         end
         Toast(HintOff and "Cargo hint off (Shift+F5 turns it back on)" or "Cargo hint on")
         Log("the F5 hint is now " .. (HintOff and "off" or "on"))
+    end
+    if CrewDumpWanted then
+        CrewDumpWanted = false
+        pcall(DumpCrew, "asked for with Ctrl+Alt+D")
     end
     if SpotWanted then
         SpotWanted = false
