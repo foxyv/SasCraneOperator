@@ -108,6 +108,11 @@ without it; a crew member who was the operator is simply resting on the boat.
 
 To take them off duty, drag them back to Resting or into another position.
 
+The operator is remembered by name. After a load they are put back in the position on their boat,
+even when the game left them off the boat (see the game notes). Ctrl+Alt+D writes where every
+crew member stands against the boats to `ue4ss/UE4SS.log`, as `CREW:` lines, for finding out why
+someone is not where they should be.
+
 ## Keys
 
 - **F5** marks or unmarks the piece of crane cargo in the middle of your view, on foot or from a
