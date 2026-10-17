@@ -10,6 +10,8 @@ if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Force $dist | Out-Null
 
 Copy-Item (Join-Path $PSScriptRoot "SasCraneOperator") $stage -Recurse
+# Only the mod itself: a test run can leave a cache in the mod folder.
+Get-ChildItem $stage -Recurse -Force -Directory -Filter ".pytest_cache" | Remove-Item -Recurse -Force
 Copy-Item (Join-Path $PSScriptRoot "LICENSE") $stage
 
 $zip = Join-Path $dist "SasCraneOperator-$Version.zip"
