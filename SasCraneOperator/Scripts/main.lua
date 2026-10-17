@@ -30,7 +30,7 @@ local MarksPath = ScriptDir .. "\\..\\..\\SasLogistics\\crane_orders.txt"  -- wr
 -- Which copy of this script is running. The log says a release name and a checksum of the file itself
 -- (tools/check_lua.py --running compares it with the repository's), so there is never a doubt whether the
 -- game loaded the version that was meant to be deployed.
-SCRIPT_VERSION = "2026-10-17.16"
+SCRIPT_VERSION = "2026-10-17.17"
 function ScriptChecksum()
     local file = io.open(debug.getinfo(1, "S").source:sub(2), "rb")
     if not file then return "unreadable", 0 end
@@ -2002,7 +2002,14 @@ local function NextMove(site, load, unload)
                 local name = "piece"
                 pcall(function() name = cargo:GetRepresentedInventoryItem():GetDisplayName():ToString() end)
                 Log("no dock area is within reach of the crane for the " .. ClassName(cargo) .. "; leaving it aboard")
-                Toast("The " .. name .. " cannot be put ashore from here: the dock is out of the crane's reach")
+                local tooFar = false
+                local okWhy, why = pcall(ExplainUnreachable, site, cargo, docks)
+                if okWhy then tooFar = why == "piece" else Log("REACH: could not explain: " .. (tostring(why):gsub("\n.*", ""))) end
+                if tooFar then
+                    Toast("The " .. name .. " is too far from the dock crane to lift from where it lies")
+                else
+                    Toast("The " .. name .. " cannot be put ashore from here: the dock is out of the crane's reach")
+                end
             end
         end
     end
@@ -2072,7 +2079,7 @@ local function NextMove(site, load, unload)
         return nil, "no room in the hold"
     end
     TidyRounds = 0
-    if #toUnload > 0 then return nil, "no room on the dock" end
+    if #toUnload > 0 then return nil, "nothing to unload can be put on the dock from here" end
     return nil
 end
 
@@ -2851,6 +2858,30 @@ function BoatFar(site)
         local over_u, over_v = math.max(0, -u, u - width), math.max(0, -v, v - depth)
         return math.sqrt(over_u * over_u + over_v * over_v)
     end
+end
+
+-- Why a piece to unload found no dock place: it lies further from the dock crane than its boom runs out
+-- (then no dock area helps), or the dock areas have no spot the boom reaches. Written to the log as REACH:
+-- lines with the numbers, and returns "piece" or "dock".
+function ExplainUnreachable(site, cargo, docks)
+    local model = ModelOf(site.crane)
+    local base = site.crane:K2_GetActorLocation()
+    local maxOut = model and model.maxOut or -1
+    local here = cargo:K2_GetActorLocation()
+    local pieceAway = Dist(here, base)
+    Log(string.format("REACH: the %s lies %.0f cm from the crane (its boom runs out to %.0f cm)", ClassName(cargo), pieceAway, maxOut))
+    for _, dock in ipairs(docks) do
+        local spots = FreeSpots(dock.area, cargo)
+        local inReach = 0
+        for _, spot in ipairs(spots) do
+            if maxOut < 0 or Dist(spot.centre, base) <= maxOut then inReach = inReach + 1 end
+        end
+        Log(string.format("REACH: %s %.0f cm from the crane: %d free spot(s), %d within the boom's reach",
+            ClassName(dock.area), Dist(dock.area:K2_GetActorLocation(), base), #spots, inReach))
+    end
+    if #docks == 0 then Log("REACH: there is no dock area within reach of the crane at all") end
+    if maxOut >= 0 and pieceAway > maxOut then return "piece" end
+    return "dock"
 end
 
 -- The cranes that can reach the piece where it stands, nearest first.
