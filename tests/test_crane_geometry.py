@@ -96,6 +96,28 @@ def test_the_dock_crane_tip_height_is_where_the_boom_puts_it(mod):
         assert abs((120.0 + height) - arm.tipZ) < 0.5
 
 
+def test_the_dock_crane_raises_its_boom_for_a_higher_tip_and_keeps_its_reach(mod):
+    """Lying flat, the hook only gets as high as the tallest stack on a medium dock, so a load carried over it
+    needs the boom raised a little, and run out further so the hook stays over the same spot."""
+    crane = FakeCrane("BP_StationaryCrane_T01_C", location=(0.0, 0.0, 120.0))
+    for out in (500, 650, 800):
+        flat = dock_arm(mod, crane, float(out), 0.0)
+        assert flat.pose.hoist == 0
+        higher = mod.test.DockCrane.Arm(crane, Vec(X=float(out), Y=0.0, Z=0.0), flat.tipZ + 150)
+        assert higher.pose.hoist > 0 and higher.pose.telescope > flat.pose.telescope
+        reach, height = dock_forward(mod, higher.pose)
+        assert abs(reach - out) < 1.0
+        assert abs((120.0 + height) - higher.tipZ) < 0.5
+        assert abs(higher.tipZ - (flat.tipZ + 150)) < 1.0
+    # A lower tip than the flat boom gives leaves it flat, and at the limit of its run it cannot rise.
+    flat = dock_arm(mod, crane, 600.0, 0.0)
+    assert mod.test.DockCrane.Arm(crane, Vec(X=600.0, Y=0.0, Z=0.0), flat.tipZ - 100).pose.hoist == 0
+    limit = mod.test.DockCrane.maxOut
+    top = mod.test.DockCrane.Arm(crane, Vec(X=limit, Y=0.0, Z=0.0), 5000.0)
+    reach, _ = dock_forward(mod, top.pose)
+    assert abs(reach - limit) < 1.0 and top.tipZ < 5000.0
+
+
 # ---- the deck crane (T02): swivel, hoist, bend and telescope --------------------------------------
 
 def deck_forward(mod, pose):

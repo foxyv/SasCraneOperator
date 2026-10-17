@@ -37,7 +37,9 @@ turned the shorter way to face the way its new place does, lined up squarely ove
 into it. While a load is lifted out from among other cargo and lowered in between it, it does not
 collide with it, so it does not snag. On the
 deck cranes the boom is drawn in before every swing and run out again after it, so it clears the
-ship's superstructure, and the load is carried high enough to clear everything under its way. A piece takes about half a minute. When the work is done the
+ship's superstructure, and the load is carried high enough to clear everything under its way. The dock crane raises its boom a little, running it out to keep its
+reach, when the hook has to go higher than the flat boom takes it, as over the tallest stacks on a
+medium dock. A piece takes about half a minute. When the work is done the
 crane is put back as it was found, along one planned route, moving smoothly through its steps, and the operator goes back to their place on the boat.
 
 Along the way the operator:

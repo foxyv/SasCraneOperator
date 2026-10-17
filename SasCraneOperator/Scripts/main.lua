@@ -2294,7 +2294,9 @@ end
 -- hoisted (degrees, 0 to 50), the boom telescopes (0 to 230, two centimetres a unit) and the cable
 -- drum pays out (centimetres). The boom is 445 cm long from a pivot 25 cm behind and 335 cm above the
 -- crane's origin and lies 2.1 degrees below level at hoist 0; the hook hangs 53 cm plus the paid-out
--- cable below its tip. The boom's height follows from its reach, so the height asked for is ignored.
+-- cable below its tip. Lying flat, the hook only gets as high as the tallest stack on a medium dock,
+-- so when a higher tip is asked for the boom is raised and run out further to keep its reach, as far
+-- as it goes; the tip returned is where it really ends up.
 BOOM_CM, BOOM_BACK_CM, BOOM_UP_CM, BOOM_DROOP_DEG = 445, 25, 335, 2.1
 TELESCOPE_CM_PER_UNIT, TELESCOPE_MAX, HOIST_MAX = 2, 230, 50
 
@@ -2313,21 +2315,31 @@ local DockCrane = {
     maxOut = (BOOM_CM + TELESCOPE_MAX * TELESCOPE_CM_PER_UNIT) * math.cos(math.rad(BOOM_DROOP_DEG)) - BOOM_BACK_CM - 15,
 }
 
-function DockCrane.Arm(crane, point)
+function DockCrane.Arm(crane, point, tipZ)
     local base, yaw = crane:K2_GetActorLocation(), crane:K2_GetActorRotation().Yaw
     local dx, dy = point.X - base.X, point.Y - base.Y
     local out = math.sqrt(dx * dx + dy * dy)
     local level = math.cos(math.rad(BOOM_DROOP_DEG))
     local hoist, telescope = 0, 0
-    local need = (out + BOOM_BACK_CM) / level   -- boom length that reaches it with the boom down
+    local run = out + BOOM_BACK_CM               -- from the pivot, in the plane
+    local need = run / level                     -- boom length that reaches it with the boom down
     if need >= BOOM_CM then
         telescope = Clamp((need - BOOM_CM) / TELESCOPE_CM_PER_UNIT, 0, TELESCOPE_MAX)
+        local longest = BOOM_CM + TELESCOPE_MAX * TELESCOPE_CM_PER_UNIT
+        local up = tipZ and (tipZ - base.Z - BOOM_UP_CM) or -math.huge   -- tip height asked for, above the pivot
+        local flatUp = -math.sqrt(math.max(need * need - run * run, 0))
+        if up > flatUp and run < longest then
+            -- Raise the boom to put the tip that high, running it out to keep the reach, as far as it goes.
+            up = math.min(up, math.sqrt(longest * longest - run * run), run * math.tan(math.rad(HOIST_MAX - BOOM_DROOP_DEG)))
+            hoist = Clamp(math.deg(math.atan(up, run)) + BOOM_DROOP_DEG, 0, HOIST_MAX)
+            telescope = Clamp((math.sqrt(run * run + up * up) - BOOM_CM) / TELESCOPE_CM_PER_UNIT, 0, TELESCOPE_MAX)
+        end
     else  -- closer than the shortest boom lying flat: raise it
-        hoist = Clamp(BOOM_DROOP_DEG + math.deg(math.acos(Clamp((out + BOOM_BACK_CM) / BOOM_CM, 0, 1))), 0, HOIST_MAX)
+        hoist = Clamp(BOOM_DROOP_DEG + math.deg(math.acos(Clamp(run / BOOM_CM, 0, 1))), 0, HOIST_MAX)
     end
     local length = BOOM_CM + telescope * TELESCOPE_CM_PER_UNIT
-    local tipZ = base.Z + BOOM_UP_CM + length * math.sin(math.rad(hoist - BOOM_DROOP_DEG))
-    return { pose = { swivel = Turn(math.deg(math.atan(dy, dx)) - yaw), hoist = hoist, telescope = telescope }, tipZ = tipZ }
+    local endZ = base.Z + BOOM_UP_CM + length * math.sin(math.rad(hoist - BOOM_DROOP_DEG))
+    return { pose = { swivel = Turn(math.deg(math.atan(dy, dx)) - yaw), hoist = hoist, telescope = telescope }, tipZ = endZ }
 end
 
 -- The knuckle-boom deck crane (T02) on the class 3 cargo ship. The platform swivels (degrees, stopping
