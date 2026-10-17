@@ -69,6 +69,19 @@ operators too. Whoever is at the controls, a load that comes off within a second
 latching is latched again straight away; letting go again soon after that is taken as meant. The
 crane operator also latches a load again if it comes off while still hanging by the hook.
 
+### A piece left on the hook, and a bollard carried off by cargo
+
+- **A piece found on a crane's hook** when the game loads (a save made mid-lift) is not touched until the
+  dock's bollards have been checked, and then it is set down on a dock area, never in the boat.
+- **A dock bollard (mooring point) carried off by cargo** is put back. One save had a bollard hanging
+  3 m above its pier, stuck to the box on the hook; a boat tied to it pulled itself over when the box
+  was put aboard. About 40 seconds after the game loads, any mooring point that has strayed more than
+  1.5 m from the middle of its two neighbours along the pier, and lies within 4.5 m of a piece of
+  cargo, is moved back between them. The log says so (`MOORING:`), and a toast tells you.
+- **Work stops while the boat is heeled over** more than 25 degrees in roll or pitch (`TILT:` in the log).
+- **Which copy is running:** each mod writes `version ..., file checksum ...` to the log when it loads, so
+  there is never a doubt whether the game took the version that was deployed.
+
 ## Install
 
 You need Windows, the Steam version of Ships At Sea, and UE4SS installed first.
@@ -149,10 +162,25 @@ someone is not where they should be.
   the piece is left alone). The arm is drawn in, swung and run out in short steps at that height. If
   the crane is caught on something anyway, it lifts a metre and carries on, a few times at most.
 - A rectangular piece may be turned half round to its place, so a container's doors can end up at
-  the other end.
+  the other end, and a square solid block (a pallet, a box) may be turned a quarter round, so it is
+  never turned more than 45 degrees to face its new place.
+- When a piece to load cannot be fitted even by rearranging, the operator first takes off a piece the planner
+  would leave on the dock at this port anyway (listed in `removable.txt` next to the planner's other files),
+  the biggest first, and tries again; only when there is none left does she give up on the piece. Nothing
+  else is ever taken off to make room, and nothing is taken off that is not needed.
+- A piece the hold cannot take even after rearranging is left where it is, with a toast, and the
+  operator tries the next. Such pieces are written to `loadfail.txt` in the Logistics mod's folder; the
+  planner reads it and plans without them, and tries them again once what the hold holds has changed.
+- With several pieces to load, the operator takes the biggest on the floor first, then the tallest,
+  and leaves the small pieces to fill the gaps. Loading in the order the pieces happen to stand fills
+  the hold much worse (see the simulation in the Logistics repo's `app/tests/sim_loading.py`).
 - When a piece to load does not fit, the operator works out moves across the whole hold: flat pieces
-  are stacked, others slid together, until the piece has a space. Each move is a full crane job, so a
-  crowded hold takes a while. It does not check that every move is within the crane's reach.
+  are stacked, others slid together, until the piece has a space. It climbs a fitness score (how much
+  of the piece's footprint is free in one place, then the biggest free area, then the free floor),
+  retrying with different good moves when it gets stuck. The result is sufficient, not optimal. Each
+  move is a full crane job, so a crowded hold takes a while. It does not check that every move is
+  within the crane's reach, and a hold whose pieces cannot be fitted together at all is left, with a
+  toast.
 - The crane's motor sounds are played by the mod, since the operator does not use the controls. They
   start when the crane moves and stop after it has been still for a moment.
 - Reloading the mod with Ctrl+R while a load is in the air can leave that one piece without its
@@ -177,6 +205,41 @@ someone is not where they should be.
 .\deploy.ps1              # copy the mod into the game; takes -GameDir for a non-default library
 .\package.ps1 v0.1.0      # build the release zip into dist\
 ```
+
+Unit tests load the real script inside Python, against a stand-in for UE4SS (`tests/lua_harness.py`), and
+drive its logic with fake game objects:
+
+```
+pip install -r requirements-dev.txt
+python -m pytest tests
+```
+
+- `test_hold_rearranging.py` makes room in full holds (the Dr. Phil's real ones) and checks every plan with a
+  separate validator;
+- `test_turn_step.py` runs the turn-before-set-down step against a fake crane whose load follows the hook a
+  little behind, with jitter: no dithering, the short way round, the quarter turn for a square block;
+- `test_crane_geometry.py` checks the arm maths against forward kinematics worked out separately;
+- `test_no_room.py` covers a piece the hold cannot take: flagged once, kept flagged while other cargo moves
+  about, looked at again only when something comes off or it is another boat;
+- `test_file_contracts.py` reads and writes the files shared with the planner (`crane_orders.txt`,
+  `loadfail.txt`) against sample files kept identical in the Logistics repository.
+
+On GitHub the same checks (the Lua check and these tests) run on every push (`.github/workflows/ci.yml`).
+
+For this the script ends with a hook that does nothing in the game: when a test sets `SAS_TEST` first, the
+local functions the tests need are handed out in `SasTest`.
+
+Check the Lua before trying it in the game:
+
+```
+python tools/check_lua.py   # luacheck, a syntax check and the count of top-level locals
+```
+
+It uses [luacheck](https://github.com/lunarmodules/luacheck/releases) (put `luacheck.exe` in
+`..\.tools\luacheck\`, or set `LUACHECK`; settings are in `.luacheckrc`) and, for the syntax check,
+`pip install lupa`. luacheck catches a function that calls a name defined further down the file, which
+is a runtime error the game only shows as a silently failing feature. A Lua file may hold only 200
+top-level local variables, and the script warns from 170.
 
 Ctrl+R in game reloads UE4SS Lua mods without a restart, if `EnableHotReloadSystem = 1` is set in
 `ue4ss\UE4SS-settings.ini`, but it has frozen or crashed the game more than once, so restart the game

@@ -3,3 +3,5 @@ operators.txt
 spots.txt
 instance.txt
 hint_off.txt
+__pycache__/
+.pytest_cache/
