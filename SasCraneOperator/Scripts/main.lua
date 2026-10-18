@@ -30,7 +30,7 @@ local MarksPath = ScriptDir .. "\\..\\..\\SasLogistics\\crane_orders.txt"  -- wr
 -- Which copy of this script is running. The log says a release name and a checksum of the file itself
 -- (tools/check_lua.py --running compares it with the repository's), so there is never a doubt whether the
 -- game loaded the version that was meant to be deployed.
-SCRIPT_VERSION = "2026-10-18.9"
+SCRIPT_VERSION = "2026-10-18.10"
 function ScriptChecksum()
     local file = io.open(debug.getinfo(1, "S").source:sub(2), "rb")
     if not file then return "unreadable", 0 end
@@ -1095,6 +1095,8 @@ end
 -- Dock areas in the cranes' reach. With a dock crane, the port's own cargo area comes first; with the
 -- boat's own cranes, the areas closest to one of them, each with the cell nearest that crane, so
 -- that what is set down there stays within the arm's reach.
+OWN_AREA_EDGE_CM = 500
+
 local function DockAreas(site)
     local at = site.crane:K2_GetActorLocation()
     local areas = {}
@@ -1112,8 +1114,10 @@ local function DockAreas(site)
                     end
                     areas[#areas + 1] = { area = area, order = best, near = near }
                 else
+                    -- The area nearest the crane is the one worked: pieces are set down in it, and loaded from it. The
+                    -- port's own cargo area only wins over another within OWN_AREA_EDGE_CM.
                     local rank = ClassName(area) == "BP_CargoArea_C" and 0 or 1
-                    areas[#areas + 1] = { area = area, order = rank * 1e9 + d }
+                    areas[#areas + 1] = { area = area, order = d + rank * OWN_AREA_EDGE_CM }
                 end
             end
         end
@@ -1841,6 +1845,7 @@ PLACES_TRIED = 16  -- free spots tried, nearest a crane first, when looking for 
 local PlaceInReach  -- (site, area, cargo) -> a place in the area a crane can reach with the piece,
                     -- or nil and a hand-over move when the neatest place is the other crane's
 local Relayed = {}  -- cargo guid -> true once handed over, so a piece is never passed back and forth
+local InOtherDockArea  -- (site, cargo) -> true if a piece to load stands in a dock area other than the one worked
 local NeedsStaging  -- (site, cargo) -> true if a piece to load stands where no crane of the site gets to it
 local StagingPlace  -- (site, area, cargo) -> a place in the area a crane can then pick the piece up from
 local Staged = {}   -- cargo guid -> true once brought to the dock by the boat
@@ -2066,6 +2071,11 @@ local function NextMove(site, load, unload)
                         return { cargo = cargo, to = dock.area, place = place, settle = true, stage = true }
                     end
                 end
+            end
+            -- Nowhere to bring it to: it is loaded from where it stands (if the crane gets to it) instead.
+            if not Staged[guid] and not site.deck then
+                Staged[guid] = true
+                Log("no place in the worked dock area for the " .. ClassName(cargo) .. "; loading it from where it stands")
             end
         end
     end
@@ -2945,6 +2955,14 @@ local function HandOverTo(site, cargo, area, place, holdSpots)
     return nil
 end
 
+-- A dock crane works the dock area nearest it. A piece standing in another dock area is not loaded from there: it
+-- is first moved into the worked area (see NextMove), unless that has been tried already.
+InOtherDockArea = function(site, cargo)
+    if site.deck or Staged[CargoGuid(cargo) or "?"] then return false end
+    local docks = DockAreas(site)
+    return docks[1] ~= nil and not Same(docks[1].area, cargo.CargoArea)
+end
+
 NeedsStaging = function(site, cargo)
     local at = site.crane:K2_GetActorLocation()
     if Dist(cargo:K2_GetActorLocation(), at) > CARGO_REACH_CM then return true end
@@ -2953,7 +2971,7 @@ NeedsStaging = function(site, cargo)
         -- dock area on the far side, is brought to the nearer area first, not pulled to the hook.
         local model = ModelOf(site.crane)
         if model and model.maxOut and Dist(PickPoint(cargo), at) > model.maxOut then return true end
-        return false
+        return InOtherDockArea(site, cargo)  -- and a piece in another area is first brought to the one worked
     end
     return #Pickers(site, cargo) == 0
 end
