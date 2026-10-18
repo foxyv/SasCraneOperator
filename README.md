@@ -127,14 +127,15 @@ rewritten at every launch):
     build does not start, try that one, or tell me which build you have.
   - Antivirus or Windows quarantined `dwmapi.dll`. Check its history, and allow the file.
 - **UE4SS starts but crashes the game at launch, or the log stops early.** In
-  `ue4ss\UE4SS-settings.ini` set `bUseUObjectArrayCache = false`. The settings used while developing this
-  were that, plus `ConsoleEnabled = 0` and `GuiConsoleEnabled = 1` (the text console off, the GUI console on).
+  `ue4ss\UE4SS-settings.ini` try `bUseUObjectArrayCache = false`. The settings used while developing this
+  differ from UE4SS's defaults in that, in `EnableHotReloadSystem = 1`, and in `ConsoleEnabled = 0` (the text
+  console off, the GUI console left on).
 - **`UE4SS.log` exists but has no `[SasCraneOperator]` lines.** The mod folder is in the wrong place or
   `enabled.txt` is missing from it. It must be `ue4ss\Mods\SasCraneOperator\enabled.txt` beside
   `Scripts\main.lua`. Check the log for `Mod 'SasCraneOperator' has enabled.txt, starting mod.`
-- **The mod loads, but there is no Crane Operator position.** The position is added to the boat you are
-  next to, once a save has loaded; look for `added the Crane Operator position` in the log. If that line
-  is missing, send the log: the lines around `[SasCraneOperator]` say what it found.
+- **The mod loads, but there is no Crane Operator position.** The position is added to your boat once a
+  save has loaded; look for `added the Crane Operator position` in the log. If that line is missing, send
+  the log: the `[SasCraneOperator]` lines say what it found.
 - **Do not use Ctrl+R to reload mods** in UE4SS: it can hang the game. Quit and relaunch instead.
 
 When asking for help, send `ue4ss\UE4SS.log`.
