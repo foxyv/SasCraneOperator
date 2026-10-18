@@ -30,7 +30,7 @@ local MarksPath = ScriptDir .. "\\..\\..\\SasLogistics\\crane_orders.txt"  -- wr
 -- Which copy of this script is running. The log says a release name and a checksum of the file itself
 -- (tools/check_lua.py --running compares it with the repository's), so there is never a doubt whether the
 -- game loaded the version that was meant to be deployed.
-SCRIPT_VERSION = "2026-10-18.7"
+SCRIPT_VERSION = "2026-10-18.8"
 function ScriptChecksum()
     local file = io.open(debug.getinfo(1, "S").source:sub(2), "rb")
     if not file then return "unreadable", 0 end
@@ -394,8 +394,10 @@ end
 -- The game is asked to read the boat key again first, then the link is written by hand.
 RelinkTries = {}
 AvatarTries = {}
-AVATAR_TRIES_MAX = 3
+AVATAR_TRIES_MAX = 12   -- the first three come quickly; the rest are spread out, in case the world needs longer
+AVATAR_QUICK_TRIES = 3
 AVATAR_SPACING_S = 8
+AVATAR_SLOW_SPACING_S = 30
 
 -- Where a crew member's character is against their boat, for the log.
 function CharacterText(member, boat)
@@ -420,7 +422,8 @@ AvatarReported = {}  -- member name -> true once the log has said that they now 
 function GiveAvatar(member, boat, comp)
     local name = MemberName(member)
     -- A few tries, a few seconds apart: the first can come before the world is ready to make a character.
-    if (AvatarTries[name] or 0) >= AVATAR_TRIES_MAX or os.clock() - (AvatarAt[name] or -1000) < AVATAR_SPACING_S then return end
+    local spacing = (AvatarTries[name] or 0) >= AVATAR_QUICK_TRIES and AVATAR_SLOW_SPACING_S or AVATAR_SPACING_S
+    if (AvatarTries[name] or 0) >= AVATAR_TRIES_MAX or os.clock() - (AvatarAt[name] or -1000) < spacing then return end
     AvatarTries[name] = (AvatarTries[name] or 0) + 1
     AvatarAt[name] = os.clock()
     local state = nil
