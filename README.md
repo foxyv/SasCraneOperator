@@ -35,6 +35,12 @@ Cargo gets marked in two ways:
   to take those marks off. You must be within 60 m of your boat; "near the boat" for loading is within
   200 m of its hold.
 
+**Stopping.** **Ctrl+Alt+S** (Stop) stops the operator at once. The piece in hand is left where it is, so
+it may still hang from the hook; every mark made by hand is taken off; and nothing new is started, even
+what the planner has ordered. Press Ctrl+Alt+S again to let her carry on (the planner's orders come back; a
+piece still on the hook is set down on the dock), or make a new mark with F5, Ctrl+Alt+L or Ctrl+Alt+U, which
+also lets her carry on. To get a piece off the hook yourself, take the crane's seat as usual.
+
 ### How the operator works
 
 While there is work the operator sits in the crane's seat and the crane moves. The boom goes over the
@@ -190,6 +196,7 @@ someone is not where they should be.
   way you leave it after a restart.
 - **Ctrl+Alt+L** marks everything on the docks near your boat to load, **Ctrl+Alt+U** everything in the
   hold to unload; again to take the marks off.
+- **Ctrl+Alt+S** stops the operator at once, and again lets her carry on (see *Stopping* above).
 - **Ctrl+Alt+O** puts the first resting crew member of the boat you are next to on crane duty, or
   takes the operator off. It does the same as dragging in the crew chart.
 - **Ctrl+Alt+H** sets where the operator waits on the boat when not at the crane: stand on the boat

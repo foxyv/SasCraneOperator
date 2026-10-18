@@ -30,7 +30,7 @@ local MarksPath = ScriptDir .. "\\..\\..\\SasLogistics\\crane_orders.txt"  -- wr
 -- Which copy of this script is running. The log says a release name and a checksum of the file itself
 -- (tools/check_lua.py --running compares it with the repository's), so there is never a doubt whether the
 -- game loaded the version that was meant to be deployed.
-SCRIPT_VERSION = "2026-10-18.2"
+SCRIPT_VERSION = "2026-10-18.3"
 function ScriptChecksum()
     local file = io.open(debug.getinfo(1, "S").source:sub(2), "rb")
     if not file then return "unreadable", 0 end
@@ -4035,6 +4035,7 @@ local function Work()
         StrandedChecked = true
         RecoverStranded()
     end
+    if Halted then return end  -- stopped with Ctrl+Alt+S
     if Job then return end  -- the piece in hand is seen to by JobStep
     if Rest > 0 then
         Rest = Rest - 1
@@ -4319,6 +4320,7 @@ local function LookedAtCargo()
 end
 
 local function ToggleMark()
+    Halted = false
     local cargo = LookedAtCargo()
     local guid = cargo and CargoGuid(cargo)
     if not guid then
@@ -4466,6 +4468,31 @@ local function UpdateHint()
     end
 end
 
+-- STOP. Ctrl+Alt+S stops the crane operator at once: the piece being moved is let alone where it is (it may
+-- still hang from the hook), every mark by hand is taken off, and nothing new is started, planner orders
+-- included, until Ctrl+Alt+S is pressed again, or a new mark is made (F5, Ctrl+Alt+L, Ctrl+Alt+U).
+Halted = false
+StopWanted = false
+
+function StopOperator()
+    if Halted then
+        Halted = false
+        Rest = 1
+        Toast("The crane operator carries on")
+        return
+    end
+    Halted = true
+    local was = Job ~= nil
+    Job, Steer, Pending = nil, nil, nil
+    for guid in pairs(Manual) do Manual[guid] = nil end
+    pcall(Unslim)
+    Log("STOP: the crane operator was stopped" .. (was and " in the middle of a piece" or ""))
+    Toast(was and "Crane operator stopped. The piece may still hang from the hook; press Ctrl+Alt+S to carry on"
+              or "Crane operator stopped. Press Ctrl+Alt+S to carry on")
+end
+
+RegisterKeyBind(Key.S, { ModifierKey.CONTROL, ModifierKey.ALT }, function() StopWanted = true end)
+
 -- Load all / Unload all. Ctrl+Alt+L marks every piece standing on the docks near your boat to go aboard, and
 -- Ctrl+Alt+U marks everything in your boat's hold to go ashore, the same marks F5 makes by hand, so the
 -- operator works through them as usual (biggest first, and says when the hold or the dock is full). Pressing
@@ -4521,6 +4548,7 @@ function MarkAll(way, hold)
 end
 
 local function MarkEverything(way)
+    Halted = false
     local here = FindFirstOf("PlayerController").Pawn:K2_GetActorLocation()
     local hold = NearestHold(here)
     if not hold then
@@ -4712,6 +4740,12 @@ LoopInGameThreadWithDelay(TICK_MS, function()
         end
         Requests = waiting
     end
+    if StopWanted then
+        StopWanted = false
+        local ok, err = pcall(StopOperator)
+        if not ok then Log("stopping failed: " .. (tostring(err):gsub("\n.*", ""))) end
+        pcall(UpdateMarkers)
+    end
     for way, wanted in pairs({ load = LoadAllWanted, unload = UnloadAllWanted }) do
         if wanted then
             if way == "load" then LoadAllWanted = false else UnloadAllWanted = false end
@@ -4807,6 +4841,7 @@ Log("loaded: cargo boats get a Crane Operator crew position; Ctrl+Alt+O seats or
 if SAS_TEST then
     SasTest = {
         Turn = Turn, Clamp = Clamp, DockCrane = DockCrane, DeckCrane = DeckCrane, ModelOf = ModelOf,
+        StopOperator = StopOperator, Work = Work, GetHalted = function() return Halted end,
         MarkAll = MarkAll, GetManual = function() return Manual end, Boxes = Boxes, Footing = Footing, FloorGap = FloorGap, PlanSpace = PlanSpace, Neatest = Neatest, ReadMarks = ReadMarks,
         JobStep = JobStep, SteerStep = SteerStep,
         SetJob = function(job) Job, Steer = job, nil end,
