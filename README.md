@@ -104,7 +104,40 @@ release does not support.
    `ue4ss\Mods\SasCraneOperator\Scripts\main.lua` exists.
 3. Start the game.
 
-To check it loaded, look in `ue4ss\UE4SS.log` for a line starting `[SasCraneOperator] loaded`.
+**3. Check that it worked.** Quit the game once it has started, then open `ue4ss\UE4SS.log` (it is
+rewritten at every launch):
+
+- If there is **no `UE4SS.log`**, UE4SS did not start, and nothing else will work either. See
+  *Troubleshooting* below.
+- If there is, search it for `[SasCraneOperator] version`. That line means the mod loaded; it also gives
+  the version and a checksum of the script.
+- Load a save with a boat of yours and look in the boat's crew chart for a **Crane Operator** position.
+  The log says `added the Crane Operator position to <boat>` when it adds one.
+
+### Troubleshooting
+
+- **No console window and no `UE4SS.log`: UE4SS itself is not loading.** The usual causes:
+  - The files were extracted into a subfolder. `dwmapi.dll` must sit directly in
+    `SAS\Binaries\Win64`, beside `Sas-Win64-Shipping.exe`, with the `ue4ss` folder next to it. The path
+    is `...\Ships At Sea\SAS\Binaries\Win64`, not the game's top folder.
+  - The wrong zip. Use `UE4SS_v3.0.1-<build>.zip`, not a `zDEV-` or `zCustomGameConfigs` one, and the
+    experimental build, not the 3.0.1 release.
+  - The experimental build is rebuilt often. The build used to develop this mod is
+    `UE4SS - v3.0.1 Beta #0 - Git SHA #5e627997` (the first lines of its `UE4SS.log` say so). If a newer
+    build does not start, try that one, or tell me which build you have.
+  - Antivirus or Windows quarantined `dwmapi.dll`. Check its history, and allow the file.
+- **UE4SS starts but crashes the game at launch, or the log stops early.** In
+  `ue4ss\UE4SS-settings.ini` set `bUseUObjectArrayCache = false`. The settings used while developing this
+  were that, plus `ConsoleEnabled = 0` and `GuiConsoleEnabled = 1` (the text console off, the GUI console on).
+- **`UE4SS.log` exists but has no `[SasCraneOperator]` lines.** The mod folder is in the wrong place or
+  `enabled.txt` is missing from it. It must be `ue4ss\Mods\SasCraneOperator\enabled.txt` beside
+  `Scripts\main.lua`. Check the log for `Mod 'SasCraneOperator' has enabled.txt, starting mod.`
+- **The mod loads, but there is no Crane Operator position.** The position is added to the boat you are
+  next to, once a save has loaded; look for `added the Crane Operator position` in the log. If that line
+  is missing, send the log: the lines around `[SasCraneOperator]` say what it found.
+- **Do not use Ctrl+R to reload mods** in UE4SS: it can hang the game. Quit and relaunch instead.
+
+When asking for help, send `ue4ss\UE4SS.log`.
 
 ### Uninstall
 
