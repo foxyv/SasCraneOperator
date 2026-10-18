@@ -30,7 +30,7 @@ local MarksPath = ScriptDir .. "\\..\\..\\SasLogistics\\crane_orders.txt"  -- wr
 -- Which copy of this script is running. The log says a release name and a checksum of the file itself
 -- (tools/check_lua.py --running compares it with the repository's), so there is never a doubt whether the
 -- game loaded the version that was meant to be deployed.
-SCRIPT_VERSION = "2026-10-18.1"
+SCRIPT_VERSION = "2026-10-18.2"
 function ScriptChecksum()
     local file = io.open(debug.getinfo(1, "S").source:sub(2), "rb")
     if not file then return "unreadable", 0 end
@@ -4466,6 +4466,82 @@ local function UpdateHint()
     end
 end
 
+-- Load all / Unload all. Ctrl+Alt+L marks every piece standing on the docks near your boat to go aboard, and
+-- Ctrl+Alt+U marks everything in your boat's hold to go ashore, the same marks F5 makes by hand, so the
+-- operator works through them as usual (biggest first, and says when the hold or the dock is full). Pressing
+-- the same key again, when everything is already marked, takes those marks off.
+MARK_ALL_BOAT_CM = 6000    -- your boat's hold must be within this of you
+MARK_ALL_DOCK_CM = 20000   -- dock cargo within this of the hold is marked to load
+LoadAllWanted, UnloadAllWanted = false, false
+
+function NearestHold(here)
+    local best, bestDist = nil, MARK_ALL_BOAT_CM
+    for _, area in ipairs(Live("CargoArea")) do
+        if IsHold(area) then
+            local d = Dist(area:K2_GetActorLocation(), here)
+            if d < bestDist then best, bestDist = area, d end
+        end
+    end
+    return best
+end
+
+-- Marks (or, when all are marked already, unmarks) the pieces that go the given way ("load" or "unload") for
+-- the given hold. Returns how many were marked (negative: how many marks were taken off), and the total.
+function MarkAll(way, hold)
+    local origin = hold:K2_GetActorLocation()
+    local pieces = {}
+    for _, cargo in ipairs(Live("HeavyCargo")) do
+        local guid = CargoGuid(cargo)
+        local area = nil
+        pcall(function() area = cargo.CargoArea end)
+        if guid and Valid(area) then
+            local candidate
+            if way == "unload" then
+                candidate = Same(area, hold)
+            else
+                candidate = not IsHold(area) and Dist(cargo:K2_GetActorLocation(), origin) < MARK_ALL_DOCK_CM
+            end
+            if candidate then pieces[#pieces + 1] = guid end
+        end
+    end
+    local marked = 0
+    for _, guid in ipairs(pieces) do
+        if Manual[guid] == way then marked = marked + 1 end
+    end
+    if #pieces > 0 and marked == #pieces then
+        for _, guid in ipairs(pieces) do Manual[guid] = nil end
+        return -marked, #pieces
+    end
+    for _, guid in ipairs(pieces) do
+        Manual[guid] = way
+        Unreachable[guid] = nil
+    end
+    Complaint = nil  -- if the operator is stuck, have them say why again
+    return #pieces, #pieces
+end
+
+local function MarkEverything(way)
+    local here = FindFirstOf("PlayerController").Pawn:K2_GetActorLocation()
+    local hold = NearestHold(here)
+    if not hold then
+        Toast("Stand near your boat first: no boat's hold is within " .. MARK_ALL_BOAT_CM / 100 .. " m")
+        return
+    end
+    local done, total = MarkAll(way, hold)
+    if total == 0 then
+        Toast(way == "load" and "There is nothing on the docks near the boat to load" or "The hold is empty")
+    elseif done < 0 then
+        Toast(string.format("Marks taken off %d piece(s)", -done))
+    elseif way == "load" then
+        Toast(string.format("%d piece(s) marked to load", done))
+    else
+        Toast(string.format("%d piece(s) marked to unload", done))
+    end
+end
+
+RegisterKeyBind(Key.L, { ModifierKey.CONTROL, ModifierKey.ALT }, function() LoadAllWanted = true end)
+RegisterKeyBind(Key.U, { ModifierKey.CONTROL, ModifierKey.ALT }, function() UnloadAllWanted = true end)
+
 local MarkWanted = false
 RegisterKeyBind(Key.F5, function()
     MarkWanted = true
@@ -4636,6 +4712,15 @@ LoopInGameThreadWithDelay(TICK_MS, function()
         end
         Requests = waiting
     end
+    for way, wanted in pairs({ load = LoadAllWanted, unload = UnloadAllWanted }) do
+        if wanted then
+            if way == "load" then LoadAllWanted = false else UnloadAllWanted = false end
+            local ok, err = pcall(MarkEverything, way)
+            if not ok then Log("marking everything failed: " .. (tostring(err):gsub("\n.*", ""))) end
+            DropHint()
+            pcall(UpdateMarkers)
+        end
+    end
     if MarkWanted then
         MarkWanted = false
         local ok, err = pcall(ToggleMark)
@@ -4722,7 +4807,7 @@ Log("loaded: cargo boats get a Crane Operator crew position; Ctrl+Alt+O seats or
 if SAS_TEST then
     SasTest = {
         Turn = Turn, Clamp = Clamp, DockCrane = DockCrane, DeckCrane = DeckCrane, ModelOf = ModelOf,
-        Boxes = Boxes, Footing = Footing, FloorGap = FloorGap, PlanSpace = PlanSpace, Neatest = Neatest, ReadMarks = ReadMarks,
+        MarkAll = MarkAll, GetManual = function() return Manual end, Boxes = Boxes, Footing = Footing, FloorGap = FloorGap, PlanSpace = PlanSpace, Neatest = Neatest, ReadMarks = ReadMarks,
         JobStep = JobStep, SteerStep = SteerStep,
         SetJob = function(job) Job, Steer = job, nil end,
         GetJob = function() return Job end,

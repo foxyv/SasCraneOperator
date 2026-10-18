@@ -28,6 +28,12 @@ Cargo gets marked in two ways:
   like the game's markers for a tracked mission. F5 again takes the mark off. While an operator is
   on duty nearby, the piece you are looking at shows a hint saying what F5 will do with it, so with
   stacked pieces you can see which one will be picked.
+- **All at once.** **Ctrl+Alt+L** (Load all) marks every piece standing on the docks near your boat
+  to go aboard, and **Ctrl+Alt+U** (Unload all) marks everything in your boat's hold to go ashore. They
+  make the same marks F5 does, so the operator works through them as usual: the biggest first, and she
+  says when the hold or the dock is full. Press the same key again, when everything is already marked,
+  to take those marks off. You must be within 60 m of your boat; "near the boat" for loading is within
+  200 m of its hold.
 
 ### How the operator works
 
@@ -182,6 +188,8 @@ someone is not where they should be.
   crane's camera, up to 80 m away.
 - **Shift+F5** switches off the hint over the piece you are looking at, or back on. It stays the
   way you leave it after a restart.
+- **Ctrl+Alt+L** marks everything on the docks near your boat to load, **Ctrl+Alt+U** everything in the
+  hold to unload; again to take the marks off.
 - **Ctrl+Alt+O** puts the first resting crew member of the boat you are next to on crane duty, or
   takes the operator off. It does the same as dragging in the crew chart.
 - **Ctrl+Alt+H** sets where the operator waits on the boat when not at the crane: stand on the boat
