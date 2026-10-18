@@ -172,7 +172,7 @@ without it; a crew member who was the operator is simply resting on the boat.
 To take them off duty, drag them back to Resting or into another position.
 
 The operator is remembered by name. After a load they are put back in the position on their boat,
-even when the game left them off the boat (see the game notes). Ctrl+Alt+D writes where every
+even when the game left them off the boat (see the game notes). Ctrl+Alt+D writes (only when pressed) where every
 crew member stands against the boats to `ue4ss/UE4SS.log`, as `CREW:` lines, for finding out why
 someone is not where they should be.
 
@@ -187,6 +187,10 @@ someone is not where they should be.
 - **Ctrl+Alt+H** sets where the operator waits on the boat when not at the crane: stand on the boat
   where you want them and press it. Without it they go back to wherever they last stood on the
   boat, or to the helm if that is not known.
+- **Ctrl+Alt+D** writes where every crew member stands to `UE4SS.log` as `CREW:` lines, and **Ctrl+Alt+T**
+  writes the tow links and what is attached to cargo as `TOWS:` lines. Both are for finding out what is
+  wrong, and are only done when you press the key: they read objects all over the world, and one player's
+  game closed during the crew dump when it ran by itself.
 
 ## What it changes in the game
 

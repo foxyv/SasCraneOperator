@@ -30,7 +30,7 @@ local MarksPath = ScriptDir .. "\\..\\..\\SasLogistics\\crane_orders.txt"  -- wr
 -- Which copy of this script is running. The log says a release name and a checksum of the file itself
 -- (tools/check_lua.py --running compares it with the repository's), so there is never a doubt whether the
 -- game loaded the version that was meant to be deployed.
-SCRIPT_VERSION = "2026-10-17.18"
+SCRIPT_VERSION = "2026-10-18.1"
 function ScriptChecksum()
     local file = io.open(debug.getinfo(1, "S").source:sub(2), "rb")
     if not file then return "unreadable", 0 end
@@ -484,8 +484,9 @@ end
 -- Where every crew member stands against every cargo boat, for the log: whether the boat lists them,
 -- what slot they name and whether that slot is one the boat has and holds them. Written once a few
 -- seconds after a boat gets its crane position, and on Ctrl+Alt+D.
-CrewDumped = {}   -- boat component address -> true
-CrewDumpedAt = {}  -- boat component address -> when its position was first seen
+-- The crew dump reads every crew member of the company, including those of boats that may not be loaded,
+-- and one player's game closed in the middle of it (the log ended right after its first line). So it is only
+-- run when asked for, with Ctrl+Alt+D, never by itself.
 CrewDumpWanted = false
 
 function DumpCrew(reason)
@@ -549,6 +550,8 @@ function DumpCrew(reason)
     end
 end
 RegisterKeyBind(Key.D, { ModifierKey.CONTROL, ModifierKey.ALT }, function() CrewDumpWanted = true end)
+TowsWanted = false
+RegisterKeyBind(Key.T, { ModifierKey.CONTROL, ModifierKey.ALT }, function() TowsWanted = true end)
 
 -- Keeps every position consistent: an operator who has left the boat is taken off, and a remembered
 -- operator who is aboard and resting is seated again (which is how a loaded save gets them back).
@@ -581,15 +584,7 @@ local function TendPositions()
             local slot = CraneSlot(comp)
             if not slot then return end
             local boat = comp:GetOwner()
-            local key = comp:GetAddress()
             if os.clock() > 0 then pcall(RelinkOperators, comp, boat) end
-            if not CrewDumped[key] then
-                CrewDumpedAt[key] = CrewDumpedAt[key] or os.clock()
-                if os.clock() - CrewDumpedAt[key] > 8 then
-                    CrewDumped[key] = true
-                    DumpCrew("after the crane position was added to " .. ClassName(boat))
-                end
-            end
             local member = slot.CrewMember
             if Valid(member) then
                 if not Same(member.Boat, boat) or not Same(member.CrewSlot, slot) then
@@ -894,7 +889,7 @@ HookNoDockTold = false
 HookInspected = false
 NextMooringTry = 0   -- os.clock() before which the bollards are not checked again
 
--- One look, a little after the game loads, at every tow link and every piece of cargo with something
+-- One look, when asked for with Ctrl+Alt+T (not by itself: it reads objects all over the world), at every tow link and every piece of cargo with something
 -- attached to it, whether or not any work is going on (TOWS: lines).
 function InspectTows()
     local lines = 0
@@ -4617,7 +4612,6 @@ LoopInGameThreadWithDelay(TICK_MS, function()
         local ok, count, points, pieces = pcall(RepairMooring)
         if ok and points > 0 and pieces > 0 then
             MooringChecked = os.clock()
-            pcall(InspectTows)
             if count > 0 then Toast("Put " .. count .. " dock bollard(s) back where they belong") end
         else
             Log("MOORING: the world is not loaded yet (" .. tostring(points) .. " mooring point(s), " .. tostring(pieces) .. " piece(s) of cargo); looking again in 10 s")
@@ -4664,6 +4658,10 @@ LoopInGameThreadWithDelay(TICK_MS, function()
     if CrewDumpWanted then
         CrewDumpWanted = false
         pcall(DumpCrew, "asked for with Ctrl+Alt+D")
+    end
+    if TowsWanted then
+        TowsWanted = false
+        pcall(InspectTows)
     end
     if SpotWanted then
         SpotWanted = false
