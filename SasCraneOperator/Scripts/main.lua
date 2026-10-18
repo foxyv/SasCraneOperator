@@ -30,7 +30,7 @@ local MarksPath = ScriptDir .. "\\..\\..\\SasLogistics\\crane_orders.txt"  -- wr
 -- Which copy of this script is running. The log says a release name and a checksum of the file itself
 -- (tools/check_lua.py --running compares it with the repository's), so there is never a doubt whether the
 -- game loaded the version that was meant to be deployed.
-SCRIPT_VERSION = "2026-10-18.5"
+SCRIPT_VERSION = "2026-10-18.6"
 function ScriptChecksum()
     local file = io.open(debug.getinfo(1, "S").source:sub(2), "rb")
     if not file then return "unreadable", 0 end
@@ -394,6 +394,8 @@ end
 -- The game is asked to read the boat key again first, then the link is written by hand.
 RelinkTries = {}
 AvatarTries = {}
+AVATAR_TRIES_MAX = 3
+AVATAR_SPACING_S = 8
 
 -- Where a crew member's character is against their boat, for the log.
 function CharacterText(member, boat)
@@ -401,6 +403,7 @@ function CharacterText(member, boat)
     pcall(function() character = member.Character end)
     if not Valid(character) then return "no character in the world" end
     local text = ClassName(character)
+    pcall(function() if character.bHidden then text = text .. ", HIDDEN" end end)
     pcall(function()
         local at, base = character:K2_GetActorLocation(), boat:K2_GetActorLocation()
         text = string.format("%s, %.0f m from the boat's origin", text, math.sqrt((at.X - base.X) ^ 2 + (at.Y - base.Y) ^ 2 + (at.Z - base.Z) ^ 2) / 100)
@@ -411,17 +414,23 @@ end
 -- The data link mended above gives the person their place in the chart, but not their character on the
 -- deck: the game makes that when it assigns them to the boat. So if there is none, the game is asked to
 -- take them off the boat and assign them again, as is done by hand in the crew chart.
+AvatarAt = {}        -- member name -> when the game was last asked for their character
+AvatarReported = {}  -- member name -> true once the log has said that they now have one
+
 function GiveAvatar(member, boat, comp)
     local name = MemberName(member)
+    -- A few tries, a few seconds apart: the first can come before the world is ready to make a character.
+    if (AvatarTries[name] or 0) >= AVATAR_TRIES_MAX or os.clock() - (AvatarAt[name] or -1000) < AVATAR_SPACING_S then return end
     AvatarTries[name] = (AvatarTries[name] or 0) + 1
-    if AvatarTries[name] > 1 then return end
+    AvatarAt[name] = os.clock()
     local state = nil
     pcall(function() state = FindFirstOf("PlayerController").PlayerState end)
     for _, employee in ipairs(Live("CompanyEmployeeComponent")) do
         local owner = nil
         pcall(function() owner = employee:GetOwner() end)
         if Valid(state) and Valid(owner) and Same(owner, state) then
-            Log(name .. " has no character on deck; asking the game to take them off the boat and assign them again")
+            Log(string.format("%s has no character on deck; asking the game to take them off the boat and assign them again (try %d of %d)",
+                name, AvatarTries[name], AVATAR_TRIES_MAX))
             pcall(function() employee:RemoveCrewMemberFromBoat(member) end)
             pcall(function() employee:AssignCrewMemberToBoat(member) end)
             return
@@ -452,6 +461,9 @@ function RelinkOperators(comp, boat)
                 if Valid(member.Boat) and listed(member) then
                     if not Valid(member.Character) and (RelinkTries[name] or 0) > 0 then
                         pcall(GiveAvatar, member, boat, comp)  -- mended by hand earlier, and still no one on deck
+                    elseif Valid(member.Character) and AvatarTries[name] and not AvatarReported[name] then
+                        AvatarReported[name] = true
+                        Log(string.format("%s now has a character: %s (after %d request(s))", name, CharacterText(member, boat), AvatarTries[name]))
                     end
                     return
                 end
