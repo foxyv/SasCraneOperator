@@ -30,7 +30,7 @@ local MarksPath = ScriptDir .. "\\..\\..\\SasLogistics\\crane_orders.txt"  -- wr
 -- Which copy of this script is running. The log says a release name and a checksum of the file itself
 -- (tools/check_lua.py --running compares it with the repository's), so there is never a doubt whether the
 -- game loaded the version that was meant to be deployed.
-SCRIPT_VERSION = "2026-10-18.10"
+SCRIPT_VERSION = "2026-10-18.11"
 function ScriptChecksum()
     local file = io.open(debug.getinfo(1, "S").source:sub(2), "rb")
     if not file then return "unreadable", 0 end
@@ -398,6 +398,10 @@ AVATAR_TRIES_MAX = 12   -- the first three come quickly; the rest are spread out
 AVATAR_QUICK_TRIES = 3
 AVATAR_SPACING_S = 8
 AVATAR_SLOW_SPACING_S = 30
+AVATAR_FIRST_DELAY_S = 20   -- the first request waits this long after the operator was first found without one: while the world
+                            -- is still loading the crew chart's objects are not safe to touch (a launch crashed in the second after it)
+AvatarFirstSeen = {}
+OwnCall = false             -- true while this script itself asks the game to move a crew member: the chart hooks stay out of it
 
 -- Where a crew member's character is against their boat, for the log.
 function CharacterText(member, boat)
@@ -422,6 +426,8 @@ AvatarReported = {}  -- member name -> true once the log has said that they now 
 function GiveAvatar(member, boat, comp)
     local name = MemberName(member)
     -- A few tries, a few seconds apart: the first can come before the world is ready to make a character.
+    AvatarFirstSeen[name] = AvatarFirstSeen[name] or os.clock()
+    if os.clock() - AvatarFirstSeen[name] < AVATAR_FIRST_DELAY_S then return end
     local spacing = (AvatarTries[name] or 0) >= AVATAR_QUICK_TRIES and AVATAR_SLOW_SPACING_S or AVATAR_SPACING_S
     if (AvatarTries[name] or 0) >= AVATAR_TRIES_MAX or os.clock() - (AvatarAt[name] or -1000) < spacing then return end
     AvatarTries[name] = (AvatarTries[name] or 0) + 1
@@ -434,8 +440,10 @@ function GiveAvatar(member, boat, comp)
         if Valid(state) and Valid(owner) and Same(owner, state) then
             Log(string.format("%s has no character on deck; asking the game to take them off the boat and assign them again (try %d of %d)",
                 name, AvatarTries[name], AVATAR_TRIES_MAX))
+            OwnCall = true
             pcall(function() employee:RemoveCrewMemberFromBoat(member) end)
             pcall(function() employee:AssignCrewMemberToBoat(member) end)
+            OwnCall = false
             return
         end
     end
@@ -751,7 +759,7 @@ local Hooked = {}
 
 local function HookChart()
     for path, handler in pairs(Hooks) do
-        if not Hooked[path] and pcall(RegisterHook, path, function(...) if not Stale() then pcall(handler, ...) end end) then
+        if not Hooked[path] and pcall(RegisterHook, path, function(...) if not Stale() and not OwnCall then pcall(handler, ...) end end) then
             Hooked[path] = true
         end
     end

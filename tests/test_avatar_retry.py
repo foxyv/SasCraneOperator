@@ -16,6 +16,7 @@ def asks(mod):
 
 def test_asking_is_spaced_then_slower_and_stops_after_twelve_tries():
     mod = load_mod()
+    mod.g.AVATAR_FIRST_DELAY_S = 0  # the wait before the first ask is tested on its own below
     who, boat = member(), GameObject("BP_Cargo_Boat_2_C")
     for _ in range(5):
         mod.g.GiveAvatar(who, boat, None)  # five looks in a row, a moment apart: only the first asks
@@ -29,6 +30,7 @@ def test_asking_is_spaced_then_slower_and_stops_after_twelve_tries():
 
 def test_after_the_quick_tries_the_wait_between_asks_is_longer():
     mod = load_mod()
+    mod.g.AVATAR_FIRST_DELAY_S = 0  # the wait before the first ask is tested on its own below
     who, boat = member(), GameObject("BP_Cargo_Boat_2_C")
     for _ in range(3):
         mod.g.GiveAvatar(who, boat, None)
@@ -42,7 +44,19 @@ def test_after_the_quick_tries_the_wait_between_asks_is_longer():
 
 def test_two_operators_are_counted_apart():
     mod = load_mod()
+    mod.g.AVATAR_FIRST_DELAY_S = 0  # the wait before the first ask is tested on its own below
     boat = GameObject("BP_Cargo_Boat_2_C")
     mod.g.GiveAvatar(member("A"), boat, None)
     mod.g.GiveAvatar(member("B"), boat, None)
     assert mod.g.AvatarTries["A"] == 1 and mod.g.AvatarTries["B"] == 1
+
+
+def test_the_first_ask_waits_for_the_world_and_the_chart_hooks_stay_out_of_it():
+    mod = load_mod()
+    who, boat = member(), GameObject("BP_Cargo_Boat_2_C")
+    mod.g.GiveAvatar(who, boat, None)  # first seen: nothing is asked yet
+    assert asks(mod) == []
+    mod.g.AvatarFirstSeen["Karethe Allum"] -= mod.g.AVATAR_FIRST_DELAY_S + 1  # the wait is up
+    mod.g.GiveAvatar(who, boat, None)
+    assert len(asks(mod)) == 1
+    assert mod.g.OwnCall is False  # and the chart hooks listen again once the request is over
