@@ -30,7 +30,7 @@ local MarksPath = ScriptDir .. "\\..\\..\\SasLogistics\\crane_orders.txt"  -- wr
 -- Which copy of this script is running. The log says a release name and a checksum of the file itself
 -- (tools/check_lua.py --running compares it with the repository's), so there is never a doubt whether the
 -- game loaded the version that was meant to be deployed.
-SCRIPT_VERSION = "2026-10-18.8"
+SCRIPT_VERSION = "2026-10-18.9"
 function ScriptChecksum()
     local file = io.open(debug.getinfo(1, "S").source:sub(2), "rb")
     if not file then return "unreadable", 0 end
@@ -2323,6 +2323,7 @@ local DockCrane = {
     -- The furthest a piece can stand from the crane's base, in the plane, for the hook to get over
     -- it with the boom fully run out (with a margin). Beyond that the arm below stops at full
     -- stretch, short of the piece, and the piece would be pulled to the hook instead.
+    swingRoute = true,  -- a long swing is made drawn in: the boom runs out much faster than the platform turns
     maxOut = (BOOM_CM + TELESCOPE_MAX * TELESCOPE_CM_PER_UNIT) * math.cos(math.rad(BOOM_DROOP_DEG)) - BOOM_BACK_CM - 15,
 }
 
@@ -3293,11 +3294,13 @@ local function HookNow(crane)
 end
 
 -- The steps that take a crane to a pose. A crane with a travelling height that has to swing far first
--- lifts its arm to that height where it is, then swings at that height straight to the new pose.
+-- lifts its arm to that height where it is, then swings at that height straight to the new pose. The dock crane
+-- does the same (swingRoute): moved all at once, its boom ran out long before the platform had turned and swept
+-- through the light poles and the like beside the dock.
 local WAYPOINT_CM = 120  -- the arm is drawn in and run out in steps this long, each at the carrying height
 
 local function SwingRoute(crane, model, target, tipZ, point)
-    if not model.travelUp or target.swivel == nil then return { target } end
+    if not (model.travelUp or model.swingRoute) or target.swivel == nil then return { target } end
     local base = crane:K2_GetActorLocation()
     local hook = HookNow(crane)
     local function polar(at)
