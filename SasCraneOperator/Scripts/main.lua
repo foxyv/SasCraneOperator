@@ -30,7 +30,7 @@ local MarksPath = ScriptDir .. "\\..\\..\\SasLogistics\\crane_orders.txt"  -- wr
 -- Which copy of this script is running. The log says a release name and a checksum of the file itself
 -- (tools/check_lua.py --running compares it with the repository's), so there is never a doubt whether the
 -- game loaded the version that was meant to be deployed.
-SCRIPT_VERSION = "2026-10-18.4"
+SCRIPT_VERSION = "2026-10-18.5"
 function ScriptChecksum()
     local file = io.open(debug.getinfo(1, "S").source:sub(2), "rb")
     if not file then return "unreadable", 0 end
@@ -4046,6 +4046,42 @@ function NoteDocking(boat, name)
     end
 end
 
+-- The docking watcher. Work looks for work only when its idle wait is up (two seconds, or five after finding
+-- nothing), so the operator could notice the boat being made fast long after it was. This is looked at every
+-- half second instead: when the game first calls the boat made fast, the wait is cancelled so that the very
+-- next step looks for work. The game's docking flags are logged when they change (DOCK: lines), to show how
+-- long the game itself takes from the boat docking to calling it made fast.
+DockSeen = {}   -- boat address -> "docked,pulling" as last seen
+
+function WatchBoat(boat, name)
+    local key = boat:GetAddress()
+    local docked, pulling = false, false
+    pcall(function()
+        local docking = boat.DockingComponent
+        docked, pulling = docking:IsDocked() == true, docking.bIsPulling == true
+    end)
+    local now = string.format("%s,%s", tostring(docked), tostring(pulling))
+    local before = DockSeen[key]
+    if now == before then return false end
+    DockSeen[key] = now
+    Log(string.format("DOCK: %s: docked %s, being pulled in %s", ClassName(boat), tostring(docked), tostring(pulling)))
+    pcall(NoteDocking, boat, name)
+    if docked and not pulling then  -- made fast: look for work at once
+        Rest = 0
+        return true
+    end
+    return false
+end
+
+function WatchDocking()
+    for _, comp in ipairs(Live("SasBoatCrewComponent")) do
+        pcall(function()
+            local slot = CraneSlot(comp)
+            if slot and Valid(slot.CrewMember) then WatchBoat(comp:GetOwner(), MemberName(slot.CrewMember)) end
+        end)
+    end
+end
+
 WhyNot, WaitToldAbout = nil, false
 local function Work()
     if not Job and (next(Slimmed) or next(Passing)) then pcall(Unslim) end
@@ -4811,6 +4847,7 @@ LoopInGameThreadWithDelay(TICK_MS, function()
     if Ticks % 2 == 0 then pcall(UpdateMarkers) end
     Lap(laps, "markers")
     pcall(UpdateHint)
+    pcall(WatchDocking)
     Lap(laps, "hint")
     if Ticks % 4 == 0 then
         pcall(EnsurePositions)
@@ -4860,6 +4897,7 @@ Log("loaded: cargo boats get a Crane Operator crew position; Ctrl+Alt+O seats or
 if SAS_TEST then
     SasTest = {
         Turn = Turn, Clamp = Clamp, DockCrane = DockCrane, DeckCrane = DeckCrane, ModelOf = ModelOf,
+        GetRest = function() return Rest end, SetRest = function(n) Rest = n end, WatchBoat = WatchBoat,
         StopOperator = StopOperator, Work = Work, GetHalted = function() return Halted end,
         MarkAll = MarkAll, GetManual = function() return Manual end, Boxes = Boxes, Footing = Footing, FloorGap = FloorGap, PlanSpace = PlanSpace, Neatest = Neatest, ReadMarks = ReadMarks,
         JobStep = JobStep, SteerStep = SteerStep,

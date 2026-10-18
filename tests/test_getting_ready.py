@@ -52,3 +52,57 @@ def test_two_boats_are_told_apart():
     mod.g.NoteDocking(first, "A")
     mod.g.NoteDocking(second, "B")
     assert len(toasts(mod)) == 2
+
+
+# ---- the docking watcher: the step after the game calls the boat made fast looks for work at once
+
+class DockingWithPull(Docking):
+    def __init__(self):
+        super().__init__()
+        self.bIsPulling = False
+
+
+def pull_boat():
+    b = GameObject("BP_Cargo_Boat_2_C")
+    b.DockingComponent = DockingWithPull()
+    return b
+
+
+def dock_lines(mod):
+    return [line for line in mod.printed if "DOCK:" in line]
+
+
+def test_the_watcher_looks_for_work_at_once_when_the_boat_is_made_fast():
+    mod = load_mod()
+    b = pull_boat()
+    mod.test.SetRest(9)
+    assert mod.test.WatchBoat(b, "Karethe Allum") is False and mod.test.GetRest() == 9  # under way
+    b.DockingComponent.docked, b.DockingComponent.bIsPulling = True, True
+    assert mod.test.WatchBoat(b, "Karethe Allum") is False and mod.test.GetRest() == 9  # docking, pulled in
+    b.DockingComponent.bIsPulling = False
+    assert mod.test.WatchBoat(b, "Karethe Allum") is True and mod.test.GetRest() == 0  # made fast: no more waiting
+
+
+def test_the_watcher_logs_each_change_of_the_games_docking_flags_once():
+    mod = load_mod()
+    b = pull_boat()
+    mod.test.WatchBoat(b, "A")
+    mod.test.WatchBoat(b, "A")  # nothing changed
+    b.DockingComponent.docked, b.DockingComponent.bIsPulling = True, True
+    mod.test.WatchBoat(b, "A")
+    b.DockingComponent.bIsPulling = False
+    mod.test.WatchBoat(b, "A")
+    lines = dock_lines(mod)
+    assert len(lines) == 3
+    assert "docked false, being pulled in false" in lines[0]
+    assert "docked true, being pulled in true" in lines[1]
+    assert "docked true, being pulled in false" in lines[2]
+
+
+def test_the_watcher_says_the_operator_is_getting_ready_when_docking_starts():
+    mod = load_mod()
+    b = pull_boat()
+    mod.test.WatchBoat(b, "Karethe Allum")
+    b.DockingComponent.docked, b.DockingComponent.bIsPulling = True, True
+    mod.test.WatchBoat(b, "Karethe Allum")
+    assert len(toasts(mod)) == 1
