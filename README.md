@@ -10,7 +10,7 @@ own Engineering positions. Put a hired crew member in it and, whenever the boat 
 and unload the cargo that has been marked, one piece at a time:
 
 - **The class 1 and 2 boats** use the dock crane beside their hold.
-  The boat has to be made fast to the dock, with the pull-in finished, for the dock crane to work.
+  The boat has to be docked (the mooring lines caught) for the dock crane to work; she starts while the game is still pulling the boat in.
 - **The class 3 cargo ship** uses its own deck cranes, one or two, never the dock's. Large-container
   docks have no crane of their own, so this is how large containers get on and off. It may be
   docked, or, where the dock it needs has no place to moor beside, lying still with its engines
@@ -177,9 +177,9 @@ without it; a crew member who was the operator is simply resting on the boat.
 2. Open the boat's crew chart and drag them onto the **Crane Operator** position. It takes about a
    second. On the class 3 ship they can be moved between Crane Operator and Engineering both ways.
 3. Dock the boat: beside a dock crane for the class 1 and 2 boats, anywhere for the class 3 ship.
-   The moment the boat docks, a toast says the operator is getting ready; the crane starts once the boat
-   is made fast and the marks reach her, which can take most of a minute.
-   Once it is made fast, the operator starts on whatever is marked. They stop when you undock. A
+   The moment the boat docks, a toast says the operator is getting ready; the crane starts as soon as the
+   boat is docked (the mooring lines caught, even while the game is still pulling it in) and the marks reach her.
+   Then the operator starts on whatever is marked. They stop when you undock. A
    boat too big to dock where its cargo has to go can also just lie still beside the dock with its
    engines off; starting an engine counts as leaving.
 

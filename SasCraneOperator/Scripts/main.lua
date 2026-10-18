@@ -30,7 +30,7 @@ local MarksPath = ScriptDir .. "\\..\\..\\SasLogistics\\crane_orders.txt"  -- wr
 -- Which copy of this script is running. The log says a release name and a checksum of the file itself
 -- (tools/check_lua.py --running compares it with the repository's), so there is never a doubt whether the
 -- game loaded the version that was meant to be deployed.
-SCRIPT_VERSION = "2026-10-18.6"
+SCRIPT_VERSION = "2026-10-18.7"
 function ScriptChecksum()
     local file = io.open(debug.getinfo(1, "S").source:sub(2), "rb")
     if not file then return "unreadable", 0 end
@@ -877,7 +877,8 @@ local function EngineRunning(boat)
     return false
 end
 
--- Is the boat ready to work cargo? Made fast to the dock with the pull-in finished (FormallyDocked),
+-- Is the boat ready to work cargo? Docked: the game's mooring lines have caught, even while it is still pulling the
+-- boat in (that takes a minute or two and the crane works meanwhile) (FormallyDocked),
 -- or, for a boat too big to dock where its cargo has to go, lying still with its engines off
 -- (LyingStill). The second is only enough for a boat working with cranes of its own: the dock's
 -- crane needs the boat made fast beside it.
@@ -886,7 +887,7 @@ MOORED_SPEED_CM = 30
 local function FormallyDocked(boat)
     local ok, docked = pcall(function()
         local docking = boat.DockingComponent
-        return docking:IsDocked() and not docking.bIsPulling
+        return docking:IsDocked()
     end)
     return ok and docked == true
 end
@@ -4078,7 +4079,7 @@ function WatchBoat(boat, name)
     DockSeen[key] = now
     Log(string.format("DOCK: %s: docked %s, being pulled in %s", ClassName(boat), tostring(docked), tostring(pulling)))
     pcall(NoteDocking, boat, name)
-    if docked and not pulling then  -- made fast: look for work at once
+    if docked then  -- the lines have caught (the pull-in may go on): look for work at once
         Rest = 0
         return true
     end

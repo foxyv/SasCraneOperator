@@ -78,9 +78,9 @@ def test_the_watcher_looks_for_work_at_once_when_the_boat_is_made_fast():
     mod.test.SetRest(9)
     assert mod.test.WatchBoat(b, "Karethe Allum") is False and mod.test.GetRest() == 9  # under way
     b.DockingComponent.docked, b.DockingComponent.bIsPulling = True, True
-    assert mod.test.WatchBoat(b, "Karethe Allum") is False and mod.test.GetRest() == 9  # docking, pulled in
+    assert mod.test.WatchBoat(b, "Karethe Allum") is True and mod.test.GetRest() == 0  # docked: no more waiting, the pull-in goes on
     b.DockingComponent.bIsPulling = False
-    assert mod.test.WatchBoat(b, "Karethe Allum") is True and mod.test.GetRest() == 0  # made fast: no more waiting
+    assert mod.test.WatchBoat(b, "Karethe Allum") is True  # and the end of the pull-in is noticed too
 
 
 def test_the_watcher_logs_each_change_of_the_games_docking_flags_once():
