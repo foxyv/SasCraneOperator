@@ -30,7 +30,7 @@ local MarksPath = ScriptDir .. "\\..\\..\\SasLogistics\\crane_orders.txt"  -- wr
 -- Which copy of this script is running. The log says a release name and a checksum of the file itself
 -- (tools/check_lua.py --running compares it with the repository's), so there is never a doubt whether the
 -- game loaded the version that was meant to be deployed.
-SCRIPT_VERSION = "2026-10-18.3"
+SCRIPT_VERSION = "2026-10-18.4"
 function ScriptChecksum()
     local file = io.open(debug.getinfo(1, "S").source:sub(2), "rb")
     if not file then return "unreadable", 0 end
@@ -4028,6 +4028,24 @@ local function StartPark(crane, model)
     Log(string.format("putting the crane back: %d step(s)", #route + 1))
 end
 
+-- When a boat with an operator on duty docks, say so at once: the crane does not start until the boat is made
+-- fast and the orders reach her, which can take most of a minute, and a silent wait looks like a broken mod.
+ReadyTold = {}     -- boat address -> true once told, until the boat undocks
+ReadyToldAt = -1000
+
+function NoteDocking(boat, name)
+    local key = boat:GetAddress()
+    local docked = false
+    pcall(function() docked = boat.DockingComponent:IsDocked() == true end)
+    if not docked then
+        ReadyTold[key] = nil
+    elseif not ReadyTold[key] then
+        ReadyTold[key] = true
+        ReadyToldAt = os.clock()
+        Toast(name .. " is getting ready to work the crane")
+    end
+end
+
 WhyNot, WaitToldAbout = nil, false
 local function Work()
     if not Job and (next(Slimmed) or next(Passing)) then pcall(Unslim) end
@@ -4051,6 +4069,7 @@ local function Work()
                 local slot = CraneSlot(comp)
                 if slot and Valid(slot.CrewMember) then
                     local reason
+                    pcall(NoteDocking, comp:GetOwner(), MemberName(slot.CrewMember))
                     site, reason = WorkSite(comp)
                     why = why or (not site and (MemberName(slot.CrewMember) .. " is not working: " .. tostring(reason)) or nil)
                     operator = site and MemberName(slot.CrewMember) or nil
@@ -4067,7 +4086,7 @@ local function Work()
     -- for the operator being broken.
     if not why then
         WaitToldAbout = false
-    elseif not WaitToldAbout and why:find("made fast", 1, true) then
+    elseif not WaitToldAbout and why:find("made fast", 1, true) and os.clock() - ReadyToldAt > 120 then
         local _, _, count = ReadMarks()
         if count > 0 or next(Manual) ~= nil then
             WaitToldAbout = true

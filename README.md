@@ -177,6 +177,8 @@ without it; a crew member who was the operator is simply resting on the boat.
 2. Open the boat's crew chart and drag them onto the **Crane Operator** position. It takes about a
    second. On the class 3 ship they can be moved between Crane Operator and Engineering both ways.
 3. Dock the boat: beside a dock crane for the class 1 and 2 boats, anywhere for the class 3 ship.
+   The moment the boat docks, a toast says the operator is getting ready; the crane starts once the boat
+   is made fast and the marks reach her, which can take most of a minute.
    Once it is made fast, the operator starts on whatever is marked. They stop when you undock. A
    boat too big to dock where its cargo has to go can also just lie still beside the dock with its
    engines off; starting an engine counts as leaving.
