@@ -30,7 +30,7 @@ local MarksPath = ScriptDir .. "\\..\\..\\SasLogistics\\crane_orders.txt"  -- wr
 -- Which copy of this script is running. The log says a release name and a checksum of the file itself
 -- (tools/check_lua.py --running compares it with the repository's), so there is never a doubt whether the
 -- game loaded the version that was meant to be deployed.
-SCRIPT_VERSION = "2026-10-17.17"
+SCRIPT_VERSION = "2026-10-17.18"
 function ScriptChecksum()
     local file = io.open(debug.getinfo(1, "S").source:sub(2), "rb")
     if not file then return "unreadable", 0 end
@@ -892,7 +892,7 @@ LoadedAt = os.clock()
 HookWaitTold = false
 HookNoDockTold = false
 HookInspected = false
-TowsInspected = false
+NextMooringTry = 0   -- os.clock() before which the bollards are not checked again
 
 -- One look, a little after the game loads, at every tow link and every piece of cargo with something
 -- attached to it, whether or not any work is going on (TOWS: lines).
@@ -3455,7 +3455,7 @@ function RepairMooring()
         if not ok and not failed then failed = err end
     end
     if failed then Log("MOORING: the check failed on a point: " .. (tostring(failed):gsub("\n.*", ""))) end
-    return repaired
+    return repaired, counted, #cargoAt
 end
 MooringFixed = {}
 
@@ -3495,8 +3495,6 @@ end
 
 -- Mooring points close to a piece that was found on the hook (a bollard was seen following such a piece).
 -- Locations only: this reads nothing else of the mooring points.
-function LoadedAgo() return string.format("%.0f", os.clock() - LoadedAt) end
-
 function MooringNear(cargo, at)
     local near, total = 0, 0
     for _, point in ipairs(Live("MooringPoint")) do
@@ -4611,21 +4609,19 @@ LoopInGameThreadWithDelay(TICK_MS, function()
     end
     LastTickAt = stepStart
     Ticks = Ticks + 1
-    if not TowsInspected and stepStart - LoadedAt > 40 then
-        TowsInspected = true
-        pcall(InspectTows)
-        for _, crane in ipairs(Live("CargoCrane")) do
-            pcall(function()
-                local held = crane.AttachedCargo
-                if Valid(held) then
-                    Log("MOORING: (while still on the hook, " .. LoadedAgo() .. " s after load)")
-                    MooringNear(held, held:K2_GetActorLocation())
-                end
-            end)
+    -- The dock's bollards are checked once the world is there to check: a slow load can leave no mooring
+    -- point or piece of cargo to see at 40 s, and a check that saw none must not count. Until it has seen
+    -- both it looks again every 10 s, and a piece found on the hook waits for it (see NextMove).
+    if not MooringChecked and stepStart - LoadedAt > 40 and stepStart >= NextMooringTry then
+        NextMooringTry = stepStart + 10
+        local ok, count, points, pieces = pcall(RepairMooring)
+        if ok and points > 0 and pieces > 0 then
+            MooringChecked = os.clock()
+            pcall(InspectTows)
+            if count > 0 then Toast("Put " .. count .. " dock bollard(s) back where they belong") end
+        else
+            Log("MOORING: the world is not loaded yet (" .. tostring(points) .. " mooring point(s), " .. tostring(pieces) .. " piece(s) of cargo); looking again in 10 s")
         end
-        local ok, count = pcall(RepairMooring)
-        MooringChecked = os.clock()
-        if ok and count > 0 then Toast("Put " .. count .. " dock bollard(s) back where they belong") end
     end
     if #MooringFixed > 0 then pcall(MooringFixedTick) end
     if #MooringLooks > 0 then pcall(MooringLooksTick) end
