@@ -116,6 +116,20 @@ rewritten at every launch):
 
 ### Troubleshooting
 
+- **The log has `Git SHA #d935b5b`, many `[PS] Failed to find GUObjectArray` lines and ends with
+  `Fatal Error: PS scan timed out`.** UE4SS started, but you have the original 3.0.1 *release* (February
+  2024), which is too old for this game's Unreal Engine: it cannot find the game's data and gives up, so no
+  mod ever loads. It also installs the old way (`UE4SS.dll`, `UE4SS-settings.ini` and `Mods` beside the game's
+  exe). Fix it by installing the experimental build over it:
+  1. Close the game. In `SAS\Binaries\Win64`, rename `UE4SS.dll` to `UE4SS.dll.old` and
+     `UE4SS-settings.ini` to `UE4SS-settings.ini.old`.
+  2. Download the newest `UE4SS_v3.0.1-<build>.zip` (not the `zDEV-` one) from the
+     [experimental-latest release](https://github.com/UE4SS-RE/RE-UE4SS/releases/tag/experimental-latest)
+     and extract it into `SAS\Binaries\Win64`, replacing `dwmapi.dll`. It makes the `ue4ss` folder.
+  3. Move your mods from the old `Win64\Mods` into `Win64\ue4ss\Mods`. Start the game; `ue4ss\UE4SS.log`
+     should now show a `Git SHA` other than `d935b5b` and your mods starting.
+
+  The [mod manager](https://github.com/foxyv/SasModManager) does all of this in one click.
 - **No console window and no `UE4SS.log`: UE4SS itself is not loading.** The usual causes:
   - The files were extracted into a subfolder. `dwmapi.dll` must sit directly in
     `SAS\Binaries\Win64`, beside `Sas-Win64-Shipping.exe`, with the `ue4ss` folder next to it. The path
